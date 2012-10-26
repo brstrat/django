@@ -14,7 +14,9 @@ def ensure_default_manager(sender, **kwargs):
     _default_manager if it's not a subclass of Manager).
     """
     cls = sender
-    if cls._meta.abstract:
+    #DJANGO_SIMPLE
+    #Poly is abstract yet instantiable
+    if cls._meta.abstract and not cls._meta.poly:
         return
     if not getattr(cls, '_default_manager', None):
         # Create the default manager, if needed.
@@ -130,7 +132,7 @@ class Manager(object):
 
     def get(self, *args, **kwargs):
         return self.get_query_set().get(*args, **kwargs)
-
+    
     def get_or_create(self, **kwargs):
         return self.get_query_set().get_or_create(**kwargs)
 

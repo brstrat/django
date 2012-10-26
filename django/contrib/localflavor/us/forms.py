@@ -26,7 +26,7 @@ class USPhoneNumberField(CharField):
         'invalid': _('Phone numbers must be in XXX-XXX-XXXX format.'),
     }
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         super(USPhoneNumberField, self).clean(value)
         if value in EMPTY_VALUES:
             return u''
@@ -55,7 +55,7 @@ class USSocialSecurityNumberField(Field):
         'invalid': _('Enter a valid U.S. Social Security number in XXX-XX-XXXX format.'),
     }
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         super(USSocialSecurityNumberField, self).clean(value)
         if value in EMPTY_VALUES:
             return u''
@@ -88,7 +88,7 @@ class USStateField(Field):
         'invalid': _('Enter a U.S. state or territory.'),
     }
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         from us_states import STATES_NORMALIZED
         super(USStateField, self).clean(value)
         if value in EMPTY_VALUES:
@@ -111,7 +111,6 @@ class USStateSelect(Select):
     def __init__(self, attrs=None):
         from us_states import STATE_CHOICES
         super(USStateSelect, self).__init__(attrs, choices=STATE_CHOICES)
-
 class USPSSelect(Select):
     """
     A Select widget that uses a list of US Postal Service codes as its

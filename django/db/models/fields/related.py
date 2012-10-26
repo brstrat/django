@@ -1,5 +1,5 @@
 from django.conf import settings
-from django.db import connection, router, transaction
+from django.db import connection, router, transaction, connections
 from django.db.backends import util
 from django.db.models import signals, get_model
 from django.db.models.fields import (AutoField, Field, IntegerField,
@@ -16,9 +16,14 @@ from django.core import exceptions
 from django import forms
 
 
+
 RECURSIVE_RELATIONSHIP_CONSTANT = 'self'
 
 pending_lookups = {}
+
+# DJANGO_SIMPLE
+class MemoizedForeignKeyModel(object):
+    pass
 
 def add_lazy_relation(cls, field, relation, operation):
     """
@@ -309,10 +314,32 @@ class ReverseSingleRelatedObjectDescriptor(object):
             # related fields, respect that.
             rel_mgr = self.field.rel.to._default_manager
             db = router.db_for_read(self.field.rel.to, instance=instance)
-            if getattr(rel_mgr, 'use_for_related_fields', False):
+
+            # DJANGO_SIMPLE
+            if issubclass(self.field.rel.to, MemoizedForeignKeyModel):
+                rel_obj = self.field.rel.to._get_memoized(**params)
+
+            elif getattr(rel_mgr, 'use_for_related_fields', False):
                 rel_obj = rel_mgr.using(db).get(**params)
             else:
                 rel_obj = QuerySet(self.field.rel.to).using(db).get(**params)
+
+            #DJANGO_SIMPLE
+            #If polymodel, change class to true poly child class
+            #TODO This only gets us access to child class methods and metadata.
+            #     This does not retrieve any values from the db from the child
+            #     model level.  Need to find a way to retrieve all values from
+            #     a db row, and instantiate the correct class by evaluating the
+            #     polyclass attribute
+            if rel_obj and getattr(rel_obj._meta, 'poly', False):
+                try:
+                    true_class_name = rel_obj.polyclass[-1] 
+                    if true_class_name != rel_obj.__class__.__name__:
+                        true_class = get_model(rel_obj._meta.app_label, true_class_name, False)
+                        rel_obj.__class__ =  true_class
+                except:
+                    pass
+            
             setattr(instance, cache_name, rel_obj)
             return rel_obj
 
@@ -821,7 +848,9 @@ class ForeignKey(RelatedField, Field):
         except AttributeError: # to._meta doesn't exist, so it must be RECURSIVE_RELATIONSHIP_CONSTANT
             assert isinstance(to, basestring), "%s(%r) is invalid. First parameter to ForeignKey must be either a model, a model name, or the string %r" % (self.__class__.__name__, to, RECURSIVE_RELATIONSHIP_CONSTANT)
         else:
-            assert not to._meta.abstract, "%s cannot define a relation with abstract class %s" % (self.__class__.__name__, to._meta.object_name)
+            #DJANGO_SIMPLE
+            #Poly is abstract, yet can have relations
+            assert not (to._meta.abstract and not to._meta.poly), "%s cannot define a relation with abstract class %s" % (self.__class__.__name__, to._meta.object_name)
             # For backwards compatibility purposes, we need to *try* and set
             # the to_field during FK construction. It won't be guaranteed to
             # be correct until contribute_to_class is called. Refs #12190.
@@ -830,7 +859,7 @@ class ForeignKey(RelatedField, Field):
 
         if 'db_index' not in kwargs:
             kwargs['db_index'] = True
-
+        
         kwargs['rel'] = rel_class(to, to_field,
             related_name=kwargs.pop('related_name', None),
             limit_choices_to=kwargs.pop('limit_choices_to', None),
@@ -847,7 +876,16 @@ class ForeignKey(RelatedField, Field):
             return
 
         using = router.db_for_read(model_instance.__class__, instance=model_instance)
-        qs = self.rel.to._default_manager.using(using).filter(
+        
+        # DJANGO_SIMPLE
+        # qs = self.rel.to._default_manager.using(using).filter(
+        try:
+            from app.util.common.auth import admin_auth
+            queryset = self.rel.to.objects_for(admin_auth, active_only=False)
+        except:
+            queryset = self.rel.to._default_manager.using(using)
+        
+        qs = queryset.filter(
                 **{self.rel.field_name: value}
              )
         qs = qs.complex_filter(self.rel.limit_choices_to)
@@ -873,7 +911,7 @@ class ForeignKey(RelatedField, Field):
             return None
         else:
             return self.rel.get_related_field().get_db_prep_save(value,
-                connection=connection)
+                    connection=connections[router.db_for_read(self.rel.to)])
 
     def value_to_string(self, obj):
         if not obj:
@@ -908,9 +946,19 @@ class ForeignKey(RelatedField, Field):
 
     def formfield(self, **kwargs):
         db = kwargs.pop('using', None)
+        #DJANGO_SIMPLE
+        #Temp fix for auth profile support
+        #ModelForm fk drop drowns should ideally be filtered by auth profile
+        try:
+            from app.util.common.auth import admin_auth
+            queryset = self.rel.to.objects_for(admin_auth)
+        except:
+            queryset = self.rel.to._default_manager
+            
         defaults = {
             'form_class': forms.ModelChoiceField,
-            'queryset': self.rel.to._default_manager.using(db).complex_filter(self.rel.limit_choices_to),
+            #'queryset': self.rel.to._default_manager.using(db).complex_filter(self.rel.limit_choices_to),
+            'queryset': queryset,
             'to_field_name': self.rel.field_name,
         }
         defaults.update(kwargs)
@@ -924,12 +972,7 @@ class ForeignKey(RelatedField, Field):
         # If the database needs similar types for key fields however, the only
         # thing we can do is making AutoField an IntegerField.
         rel_field = self.rel.get_related_field()
-        if (isinstance(rel_field, AutoField) or
-                (not connection.features.related_fields_match_type and
-                isinstance(rel_field, (PositiveIntegerField,
-                                       PositiveSmallIntegerField)))):
-            return IntegerField().db_type(connection=connection)
-        return rel_field.db_type(connection=connection)
+        return rel_field.related_db_type(connection=connections[router.db_for_read(rel_field.model)])
 
 class OneToOneField(ForeignKey):
     """

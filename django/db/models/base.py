@@ -44,7 +44,18 @@ class ModelBase(type):
         else:
             meta = attr_meta
         base_meta = getattr(new_class, '_meta', None)
+        
+        #DJANGO_SIMPLE
+        #Adds meta flag indicating 1) polymodel
+        #                          2) dictionary of models to cascade delete
+        poly = getattr(base_meta, 'poly', None)
+        if poly:
+            setattr(meta, 'poly', poly)
 
+        cascade_delete = getattr(base_meta, 'cascade_delete', {})
+        if cascade_delete:
+            setattr(meta, 'cascade_delete', cascade_delete)
+        
         if getattr(meta, 'app_label', None) is None:
             # Figure out the app_label by looking one level up.
             # For 'django.contrib.sites.models', this would be 'sites'.
@@ -54,6 +65,13 @@ class ModelBase(type):
             kwargs = {}
 
         new_class.add_to_class('_meta', Options(meta, **kwargs))
+        
+        #DJANGO_SIMPLE
+        #Adds 'DoesNotExist' exception to abstract poly classes
+        if poly and abstract:
+            new_class.add_to_class('DoesNotExist', subclass_exception('DoesNotExist',
+                    (ObjectDoesNotExist, object), module))
+            
         if not abstract:
             new_class.add_to_class('DoesNotExist', subclass_exception('DoesNotExist',
                     tuple(x.DoesNotExist
@@ -144,7 +162,8 @@ class ModelBase(type):
                                      'with field of similar name from '
                                      'base class %r' %
                                         (field.name, name, base.__name__))
-            if not base._meta.abstract:
+
+            if not base._meta.abstract and not poly:
                 # Concrete classes...
                 while base._meta.proxy:
                     # Skip over a proxy class to the "real" base it proxies.
@@ -184,12 +203,17 @@ class ModelBase(type):
                                      'abstract base class %r' % \
                                         (field.name, name, base.__name__))
                 new_class.add_to_class(field.name, copy.deepcopy(field))
-
-        if abstract:
+        
+        #DJANGO_SIMPLE
+        #Poly is abstract yet instantiable (for querying purposes)
+        if abstract and not poly:
             # Abstract base models can't be instantiated and don't appear in
             # the list of models for an app. We do the final setup for them a
             # little differently from normal models.
             attr_meta.abstract = False
+            #DJANGO_SIMPLE
+            #Reset verbose_name so we can calculate our own
+            attr_meta.verbose_name = None
             new_class.Meta = attr_meta
             return new_class
 
@@ -273,36 +297,58 @@ class Model(object):
     _deferred = False
 
     def __init__(self, *args, **kwargs):
+        self._entity_exists = kwargs.pop('__entity_exists', False)
         signals.pre_init.send(sender=self.__class__, args=args, kwargs=kwargs)
 
         # Set up the storage for instance state
         self._state = ModelState()
-
         # There is a rather weird disparity here; if kwargs, it's set, then args
         # overrides it. It should be one or the other; don't duplicate the work
         # The reason for the kwargs check is that standard iterator passes in by
         # args, and instantiation for iteration is 33% faster.
-        args_len = len(args)
-        if args_len > len(self._meta.fields):
-            # Daft, but matches old exception sans the err msg.
-            raise IndexError("Number of args exceeds number of fields")
 
-        fields_iter = iter(self._meta.fields)
-        if not kwargs:
-            # The ordering of the izip calls matter - izip throws StopIteration
-            # when an iter throws it. So if the first iter throws it, the second
-            # is *not* consumed. We rely on this, so don't change the order
-            # without changing the logic.
-            for val, field in izip(args, fields_iter):
-                setattr(self, field.attname, val)
+        # DJANGO_SIMPLE 
+        # polymodel can have more fields passed in than exist on the leaf model
+        if not getattr(self._meta, 'poly', False):
+            args_len = len(args)
+            if args_len > len(self._meta.fields):
+    
+                # Daft, but matches old exception sans the err msg.
+                raise IndexError("Number of args exceeds number of fields")
+
+        # DJANGO_SIMPLE
+        # polymodel must be set differently, due to having more db columns than exist in the leaf model
+        if getattr(self._meta, 'poly', False):
+            fields_iter = iter(self._meta.poly_fields)
+            _local_field_names = [f.name for f in self._meta.fields]
+            if not kwargs:
+                for val, field in izip(args, fields_iter):
+                    if field.name in _local_field_names:
+                        setattr(self, field.attname, val if val is not None else field.get_default())
+            else:
+                for val, field in izip(args, fields_iter):
+                    if field.name in _local_field_names:
+                        setattr(self, field.attname, val if val is not None else field.get_default())
+                    kwargs.pop(field.name, None)
+                    if isinstance(field.rel, ManyToOneRel):
+                        kwargs.pop(field.attname, None)
         else:
-            # Slower, kwargs-ready version.
-            for val, field in izip(args, fields_iter):
-                setattr(self, field.attname, val)
-                kwargs.pop(field.name, None)
-                # Maintain compatibility with existing calls.
-                if isinstance(field.rel, ManyToOneRel):
-                    kwargs.pop(field.attname, None)
+            fields_iter = iter(self._meta.fields)
+            if not kwargs:
+                # The ordering of the izip calls matter - izip throws StopIteration
+                # when an iter throws it. So if the first iter throws it, the second
+                # is *not* consumed. We rely on this, so don't change the order
+                # without changing the logic.
+                for val, field in izip(args, fields_iter):
+                    setattr(self, field.attname, val if val is not None else field.get_default())
+            else:
+                # Slower, kwargs-ready version.
+                for val, field in izip(args, fields_iter):
+                    setattr(self, field.attname, val if val is not None else field.get_default())
+                    kwargs.pop(field.name, None)
+                    # Maintain compatibility with existing calls.
+                    if isinstance(field.rel, ManyToOneRel):
+                        kwargs.pop(field.attname, None)
 
         # Now we're left with the unprocessed fields that *must* come from
         # keywords, or default.
@@ -362,6 +408,7 @@ class Model(object):
                     pass
             if kwargs:
                 raise TypeError("'%s' is an invalid keyword argument for this function" % kwargs.keys()[0])
+        self._original_pk = self.pk if self._meta.pk is not None else None
         super(Model, self).__init__()
         signals.post_init.send(sender=self.__class__, instance=self)
 
@@ -470,6 +517,7 @@ class Model(object):
         ('raw', 'cls', and 'origin').
         """
         using = using or router.db_for_write(self.__class__, instance=self)
+        entity_exists = bool(self._entity_exists and self._original_pk == self.pk)
         connection = connections[using]
         assert not (force_insert and force_update)
         if cls is None:
@@ -516,7 +564,19 @@ class Model(object):
             pk_set = pk_val is not None
             record_exists = True
             manager = cls._base_manager
-            if pk_set:
+            # TODO/NONREL: Some backends could emulate force_insert/_update
+            # with an optimistic transaction, but since it's costly we should
+            # only do it when the user explicitly wants it.
+            # By adding support for an optimistic locking transaction
+            # in Django (SQL: SELECT ... FOR UPDATE) we could even make that
+            # part fully reusable on all backends (the current .exists()
+            # check below isn't really safe if you have lots of concurrent
+            # requests. BTW, and neither is QuerySet.get_or_create).
+            try_update = connection.features.distinguishes_insert_from_update
+            if not try_update:
+                record_exists = False
+
+            if try_update and pk_set:
                 # Determine whether a record with the primary key already exists.
                 if (force_update or (not force_insert and
                         manager.using(using).filter(pk=pk_val).exists())):
@@ -536,13 +596,18 @@ class Model(object):
                     order_value = manager.using(using).filter(**{field.name: getattr(self, field.attname)}).count()
                     self._order = order_value
 
+                if connection.features.distinguishes_insert_from_update:
+                    add = True
+                else:
+                    add = not entity_exists
+
                 if not pk_set:
                     if force_update:
                         raise ValueError("Cannot force an update in save() with no primary key.")
-                    values = [(f, f.get_db_prep_save(raw and getattr(self, f.attname) or f.pre_save(self, True), connection=connection))
+                    values = [(f, f.get_db_prep_save(raw and getattr(self, f.attname) or f.pre_save(self, add), connection=connection))
                         for f in meta.local_fields if not isinstance(f, AutoField)]
                 else:
-                    values = [(f, f.get_db_prep_save(raw and getattr(self, f.attname) or f.pre_save(self, True), connection=connection))
+                    values = [(f, f.get_db_prep_save(raw and getattr(self, f.attname) or f.pre_save(self, add), connection=connection))
                         for f in meta.local_fields]
 
                 record_exists = False
@@ -564,11 +629,17 @@ class Model(object):
         # Once saved, this is no longer a to-be-added instance.
         self._state.adding = False
 
+        self._entity_exists = True
+        self._original_pk = self.pk
+
         # Signal that the save is complete
         if origin and not meta.auto_created:
+            if connection.features.distinguishes_insert_from_update:
+                created = not record_exists
+            else:
+                created = not entity_exists
             signals.post_save.send(sender=origin, instance=self,
-                created=(not record_exists), raw=raw, using=using)
-
+                created=created, raw=raw, using=using)
 
     save_base.alters_data = True
 
@@ -579,6 +650,9 @@ class Model(object):
         collector = Collector(using=using)
         collector.collect([self])
         collector.delete()
+
+        self._entity_exists = False
+        self._original_pk = None
 
     delete.alters_data = True
 

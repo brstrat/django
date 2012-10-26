@@ -19,10 +19,16 @@ except NameError:
 # Calculate the verbose_name by converting from InitialCaps to "lowercase with spaces".
 get_verbose_name = lambda class_name: re.sub('(((?<=[a-z])[A-Z])|([A-Z](?![A-Z]|$)))', ' \\1', class_name).lower().strip()
 
+#DJANGO_SIMPLE
+#Added to allowed meta fields
+#    poly
+#    cascade_delete
+#    unindexed
+#    indexed
 DEFAULT_NAMES = ('verbose_name', 'verbose_name_plural', 'db_table', 'ordering',
                  'unique_together', 'permissions', 'get_latest_by',
                  'order_with_respect_to', 'app_label', 'db_tablespace',
-                 'abstract', 'managed', 'proxy', 'auto_created')
+                 'abstract', 'managed', 'proxy', 'auto_created', 'poly', 'cascade_delete', 'unindexed', 'indexed')
 
 class Options(object):
     def __init__(self, meta, app_label=None):
@@ -43,6 +49,10 @@ class Options(object):
         self.pk = None
         self.has_auto_field, self.auto_field = False, None
         self.abstract = False
+        self.poly = False
+        self.cascade_delete = {}
+        self.unindexed = []
+        self.indexed = []
         self.managed = True
         self.proxy = False
         self.proxy_for_model = None
@@ -165,6 +175,9 @@ class Options(object):
                 del self._m2m_cache
         else:
             self.local_fields.insert(bisect(self.local_fields, field), field)
+            if getattr(self, 'poly_fields', []):
+                if field.name not in [f.name for f in self.poly_fields]:
+                    self.poly_fields.insert(bisect(self.poly_fields, field), field)
             self.setup_pk(field)
             if hasattr(self, '_field_cache'):
                 del self._field_cache

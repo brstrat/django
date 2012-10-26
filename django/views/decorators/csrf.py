@@ -1,4 +1,5 @@
-from django.middleware.csrf import CsrfViewMiddleware
+#DJANGO SIMPLE
+from django_simple.middleware_.csrf import CsrfViewMiddleware
 from django.utils.decorators import decorator_from_middleware, available_attrs
 
 try:

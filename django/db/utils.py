@@ -122,7 +122,7 @@ class ConnectionRouter(object):
                 router = r
             self.routers.append(router)
 
-    def _router_func(action):
+    def _router_func(action): #@NoSelf
         def _route_db(self, model, **hints):
             chosen_db = None
             for router in self.routers:

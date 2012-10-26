@@ -12,6 +12,9 @@ from django.db.models.query_utils import (Q, select_related_descend,
 from django.db.models.deletion import Collector
 from django.db.models import signals, sql
 from django.utils.copycompat import deepcopy
+#DJANGO_SIMPLE
+#Used in polyclass class switching
+from django.db.models import get_model
 
 # Used to control how many objects are worked with at once in some cases (e.g.
 # when deleting objects).
@@ -37,7 +40,7 @@ class QuerySet(object):
         self._iter = None
         self._sticky_filter = False
         self._for_write = False
-
+    
     ########################
     # PYTHON MAGIC METHODS #
     ########################
@@ -216,7 +219,9 @@ class QuerySet(object):
         An iterator over the results from applying this QuerySet to the
         database.
         """
-        fill_cache = self.query.select_related
+        fill_cache = False
+        if connections[self.db].features.supports_select_related:
+            fill_cache = self.query.select_related
         if isinstance(fill_cache, dict):
             requested = fill_cache
         else:
@@ -232,7 +237,10 @@ class QuerySet(object):
             pk_idx = self.model._meta.pk_index()
 
         index_start = len(extra_select)
-        aggregate_start = index_start + len(self.model._meta.fields)
+        if getattr(self.model._meta, 'poly', False):
+            aggregate_start = index_start + len(self.model._meta.poly_fields)
+        else:
+            aggregate_start = index_start + len(self.model._meta.fields)
 
         load_fields = []
         # If only/defer clauses have been specified,
@@ -270,6 +278,9 @@ class QuerySet(object):
         db = self.db
         model = self.model
         compiler = self.query.get_compiler(using=db)
+
+        if getattr(model._meta, 'poly', False):
+            polyclass_field_index = model._meta.polyclass_field_index()
         for row in compiler.results_iter():
             if fill_cache:
                 obj, _ = get_cached_row(model, row,
@@ -280,10 +291,23 @@ class QuerySet(object):
                 if skip:
                     row_data = row[index_start:aggregate_start]
                     pk_val = row_data[pk_idx]
-                    obj = model_cls(**dict(zip(init_list, row_data)))
+                    obj = model_cls(**dict(zip(init_list, row_data), __entity_exists=True))
                 else:
+                    #DJANGO_SIMPLE
+                    #Instantiate polymodel at the correct class
+                    if getattr(model._meta, 'poly', False):
+                        polyclass = row[polyclass_field_index]
+                        if polyclass and not isinstance(polyclass, list):
+                            polyclass = [polyclass]
+                        try:
+                            if model.class_name() != polyclass[-1]:
+                                model = get_model(model._meta.app_label, polyclass[-1], False)
+                        except IndexError:
+                            # Handles the case where polyclass is [] in the db
+                            row[polyclass_field_index] = [model.class_name()]
+                    
                     # Omit aggregates in object creation.
-                    obj = model(*row[index_start:aggregate_start])
+                    obj = model(*row[index_start:aggregate_start], **{'__entity_exists': True})
 
                 # Store the source database of the object
                 obj._state.db = db
@@ -1075,6 +1099,10 @@ class EmptyQuerySet(QuerySet):
         """
         return self
 
+    #DJANGO_SIMPLE
+    def clear_order_by(self):
+        return self
+
     def order_by(self, *field_names):
         """
         Always returns EmptyQuerySet.
@@ -1195,9 +1223,9 @@ def get_cached_row(klass, row, index_start, using, max_depth=0, cur_depth=0,
             obj = None
         elif skip:
             klass = deferred_class_factory(klass, skip)
-            obj = klass(**dict(zip(init_list, fields)))
+            obj = klass(__entity_exists=True, **dict(zip(init_list, fields)))
         else:
-            obj = klass(*fields)
+            obj = klass(*fields, **{'__entity_exists': True})
 
     else:
         # Load all fields on klass
@@ -1213,7 +1241,7 @@ def get_cached_row(klass, row, index_start, using, max_depth=0, cur_depth=0,
         if fields == (None,) * field_count:
             obj = None
         else:
-            obj = klass(**dict(zip(field_names, fields)))
+            obj = klass(__entity_exists=True, **dict(zip(field_names, fields)))
 
     # If an object was retrieved, set the database state.
     if obj:

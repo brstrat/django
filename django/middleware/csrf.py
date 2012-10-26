@@ -49,8 +49,6 @@ def _get_failure_view():
 def _get_new_csrf_key():
     return md5_constructor("%s%s"
                 % (randrange(0, _MAX_CSRF_KEY), settings.SECRET_KEY)).hexdigest()
-
-
 def _make_legacy_session_token(session_id):
     return md5_constructor(settings.SECRET_KEY + session_id).hexdigest()
 
@@ -183,9 +181,9 @@ class CsrfViewMiddleware(object):
                     session_id = request.COOKIES[settings.SESSION_COOKIE_NAME]
                     csrf_token = _make_legacy_session_token(session_id)
                 except KeyError:
-                    # No CSRF cookie and no session cookie. For POST requests,
-                    # we insist on a CSRF cookie, and in this way we can avoid
-                    # all CSRF attacks, including login CSRF.
+                # No CSRF cookie. For POST requests, we insist on a CSRF cookie,
+                # and in this way we can avoid all CSRF attacks, including login
+                # CSRF.
                     logger.warning('Forbidden (%s): %s' % (REASON_NO_COOKIE, request.path),
                         extra={
                             'status_code': 403,
@@ -196,7 +194,7 @@ class CsrfViewMiddleware(object):
             else:
                 csrf_token = request.META["CSRF_COOKIE"]
 
-            # check incoming token
+            # check non-cookie token for match
             request_csrf_token = request.POST.get('csrfmiddlewaretoken', '')
             if request_csrf_token == "":
                 # Fall back to X-CSRFToken, to make things easier for AJAX
@@ -302,7 +300,6 @@ class CsrfMiddleware(object):
     Django middleware that adds protection against Cross Site
     Request Forgeries by adding hidden form fields to POST forms and
     checking requests for the correct value.
-
     CsrfMiddleware uses two middleware, CsrfViewMiddleware and
     CsrfResponseMiddleware, which can be used independently.  It is recommended
     to use only CsrfViewMiddleware and use the csrf_token template tag in
@@ -313,14 +310,12 @@ class CsrfMiddleware(object):
     def __init__(self):
         self.response_middleware = CsrfResponseMiddleware()
         self.view_middleware = CsrfViewMiddleware()
-
     def process_response(self, request, resp):
         # We must do the response post-processing first, because that calls
         # get_token(), which triggers a flag saying that the CSRF cookie needs
         # to be sent (done in CsrfViewMiddleware.process_response)
         resp2 = self.response_middleware.process_response(request, resp)
         return self.view_middleware.process_response(request, resp2)
-
     def process_view(self, request, callback, callback_args, callback_kwargs):
         return self.view_middleware.process_view(request, callback, callback_args,
                                                  callback_kwargs)

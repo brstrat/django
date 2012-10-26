@@ -14,7 +14,12 @@ from django.http import QueryDict
 from django.test import _doctest as doctest
 from django.test.client import Client
 from django.test.utils import get_warnings_state, restore_warnings_state
-from django.utils import simplejson, unittest as ut2
+
+try:
+    import json
+except ImportError:
+    from django.utils import simplejson as json
+from django.utils import unittest as ut2
 from django.utils.encoding import smart_str
 from django.utils.functional import wraps
 
@@ -157,8 +162,8 @@ class OutputChecker(doctest.OutputChecker):
         "Tries to compare want and got as if they were JSON-encoded data"
         want, got = self._strip_quotes(want, got)
         try:
-            want_json = simplejson.loads(want)
-            got_json = simplejson.loads(got)
+            want_json = json.loads(want)
+            got_json = json.loads(got)
         except:
             return False
         return want_json == got_json

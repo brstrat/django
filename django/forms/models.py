@@ -13,7 +13,7 @@ from django.core.exceptions import ValidationError, NON_FIELD_ERRORS, \
 from django.core.validators import EMPTY_VALUES
 from util import ErrorList
 from forms import BaseForm, get_declared_fields
-from fields import Field, ChoiceField
+from fields import Field, ChoiceField, DisplayOnlyField
 from widgets import SelectMultiple, HiddenInput, MultipleHiddenInput
 from widgets import media_property
 from formsets import BaseFormSet, formset_factory
@@ -69,8 +69,10 @@ def save_instance(form, instance, fields=None, fail_message='saved',
         instance = construct_instance(form, instance, fields, exclude)
     opts = instance._meta
     if form.errors:
+        #DJANGO_SIMPLE
+        #Added errors dict to error message
         raise ValueError("The %s could not be %s because the data didn't"
-                         " validate." % (opts.object_name, fail_message))
+                         " validate.  Errors: %s" % (opts.object_name, fail_message, form.errors))
 
     # Wrap up the saving of m2m data as a function.
     def save_m2m():
@@ -110,8 +112,10 @@ def model_to_dict(instance, fields=None, exclude=None):
     opts = instance._meta
     data = {}
     for f in opts.fields + opts.many_to_many:
-        if not f.editable:
-            continue
+        # DJANGO_SIMPLE
+        # Non-editable fields are still added, but display-only
+        #if not f.editable:
+        #    continue
         if fields and not f.name in fields:
             continue
         if exclude and f.name in exclude:
@@ -127,9 +131,19 @@ def model_to_dict(instance, fields=None, exclude=None):
                 data[f.name] = [obj.pk for obj in f.value_from_object(instance)]
         else:
             data[f.name] = f.value_from_object(instance)
+
+    # DJANGO_SIMPLE
+    if fields:
+        for prop_field in (f for f in fields if f not in data):
+            if hasattr(instance, prop_field):
+                d = getattr(instance, prop_field)
+                if callable(d):
+                    d = d()
+                data[prop_field] = d
+
     return data
 
-def fields_for_model(model, fields=None, exclude=None, widgets=None, formfield_callback=None):
+def fields_for_model(model, form_opts, formfield_callback=None):
     """
     Returns a ``SortedDict`` containing form fields for the given model.
 
@@ -143,17 +157,34 @@ def fields_for_model(model, fields=None, exclude=None, widgets=None, formfield_c
     field_list = []
     ignored = []
     opts = model._meta
+
+    # DJANGO_SIMPLE
+    fields = getattr(form_opts, 'fields', None)
+    exclude = getattr(form_opts, 'exclude', None)
+    widgets = getattr(form_opts, 'widgets', None)
+    filters = getattr(form_opts, 'filters', None)
+
     for f in opts.fields + opts.many_to_many:
-        if not f.editable:
-            continue
+        # DJANGO_SIMPLE
+        # Non-editable fields are still added, but display-only
+        #if not f.editable:
+        #    continue
         if fields is not None and not f.name in fields:
             continue
         if exclude and f.name in exclude:
             continue
+        
+        kwargs = {}
         if widgets and f.name in widgets:
-            kwargs = {'widget': widgets[f.name]}
-        else:
-            kwargs = {}
+            kwargs['widget'] = widgets[f.name]
+        
+        if filters and f.name in filters:
+            kwargs['filters'] = filters[f.name]
+
+        #DJANGO_SIMPLE
+        kwargs['editable'] = f.editable
+        if not f.editable:
+            kwargs['required'] = False
 
         if formfield_callback is None:
             formfield = f.formfield(**kwargs)
@@ -166,12 +197,30 @@ def fields_for_model(model, fields=None, exclude=None, widgets=None, formfield_c
             field_list.append((f.name, formfield))
         else:
             ignored.append(f.name)
+
     field_dict = SortedDict(field_list)
     if fields:
         field_dict = SortedDict(
             [(f, field_dict.get(f)) for f in fields
                 if ((not exclude) or (exclude and f not in exclude)) and (f not in ignored)]
         )
+
+    # DJANGO_SIMPLE
+    # For any values in the form.fields tuple that weren't found in the model's field list,
+    # check if there is a property defined on the model
+    # If so, we'll grab that and use it as a DisplayOnlyField
+    for prop_field in (f 
+                       for f, v in field_dict.iteritems()
+                       if not v and hasattr(model, f)):
+        kwargs = {}
+        if widgets and f.name in widgets:
+            kwargs['widget'] = widgets[f.name]
+
+        if filters and f.name in filters:
+            kwargs['filters'] = filters[f.name]
+
+        field_dict[prop_field] = DisplayOnlyField(**kwargs)
+
     return field_dict
 
 class ModelFormOptions(object):
@@ -180,7 +229,7 @@ class ModelFormOptions(object):
         self.fields = getattr(options, 'fields', None)
         self.exclude = getattr(options, 'exclude', None)
         self.widgets = getattr(options, 'widgets', None)
-
+        self.filters = getattr(options, 'filters', None)
 
 class ModelFormMetaclass(type):
     def __new__(cls, name, bases, attrs):
@@ -201,17 +250,28 @@ class ModelFormMetaclass(type):
         opts = new_class._meta = ModelFormOptions(getattr(new_class, 'Meta', None))
         if opts.model:
             # If a model is defined, extract form fields from it.
-            fields = fields_for_model(opts.model, opts.fields,
-                                      opts.exclude, opts.widgets, formfield_callback)
+
+            # DJANGO_SIMPLE
+            #fields = fields_for_model(opts.model, opts.fields, opts.exclude, opts.widgets, formfield_callback)
+            fields = fields_for_model(opts.model, opts, formfield_callback)
+            
             # make sure opts.fields doesn't specify an invalid field
             none_model_fields = [k for k, v in fields.iteritems() if not v]
-            missing_fields = set(none_model_fields) - \
-                             set(declared_fields.keys())
-            if missing_fields:
-                message = 'Unknown field(s) (%s) specified for %s'
-                message = message % (', '.join(missing_fields),
-                                     opts.model.__name__)
-                raise FieldError(message)
+            #missing_fields = set(none_model_fields) - \
+            #                 set(declared_fields.keys())
+            
+            # DJANGO_SIMPLE
+            # Remove any thing from fields tuple that is not on the model
+            if opts.fields:
+                new_class._meta.fields = tuple(f for f in opts.fields if f not in none_model_fields)
+
+            for missing_field in none_model_fields:
+                if missing_field not in declared_fields:
+                    message = 'Unknown field(s) (%s) specified for %s'
+                    message = message % (', '.join([missing_field]),
+                                         opts.model.__name__)
+                    raise FieldError(message)
+
             # Override default model fields with any custom declared ones
             # (plus, include all the other declared fields).
             fields.update(declared_fields)
@@ -224,7 +284,7 @@ class ModelFormMetaclass(type):
 class BaseModelForm(BaseForm):
     def __init__(self, data=None, files=None, auto_id='id_%s', prefix=None,
                  initial=None, error_class=ErrorList, label_suffix=':',
-                 empty_permitted=False, instance=None):
+                 empty_permitted=False, instance=None, *args, **kwargs):
         opts = self._meta
         if instance is None:
             if opts.model is None:
@@ -244,6 +304,12 @@ class BaseModelForm(BaseForm):
         self._validate_unique = False
         super(BaseModelForm, self).__init__(data, files, auto_id, prefix, object_data,
                                             error_class, label_suffix, empty_permitted)
+
+        # DJANGO_SIMPLE
+        # DisplayOnlyFields need a snapshot of the value from the instance, since their
+        # data won't be passed around in bound data
+        for name, field in ((n, f) for n, f in self.fields.iteritems() if isinstance(f, DisplayOnlyField)):
+            field.widget.static_value = getattr(instance, name, None)
 
     def _update_errors(self, message_dict):
         for k, v in message_dict.items():
@@ -430,7 +496,9 @@ class BaseModelFormSet(BaseFormSet):
             # Import goes here instead of module-level because importing
             # django.db has side effects.
             from django.db import connections
-            pk_key = "%s-%s" % (self.add_prefix(i), self.model._meta.pk.name)
+            #DJANGO_SIMPLE
+            #pk_key = "%s-%s" % (self.add_prefix(i), self.model._meta.pk.name)
+            pk_key = "%s__%s" % (self.add_prefix(i), self.model._meta.pk.name)
             pk = self.data[pk_key]
             pk_field = self.model._meta.pk
             pk = pk_field.get_db_prep_lookup('exact', pk,
@@ -641,7 +709,16 @@ class BaseModelFormSet(BaseFormSet):
             if isinstance(pk, OneToOneField) or isinstance(pk, ForeignKey):
                 qs = pk.rel.to._default_manager.get_query_set()
             else:
-                qs = self.model._default_manager.get_query_set()
+                #DJANGO_SIMPLE 
+                #get_query_set()
+                from app.util.common.auth import admin_auth
+                try:
+                    qs = self.model.objects_for(admin_auth)
+                except:
+                    #DJANGO_SIMPLE
+                    #qs = self.model._default_manager.get_query_set()
+                    qs = self.model._default_manager
+
             qs = qs.using(form.instance._state.db)
             form.fields[self._pk_field.name] = ModelChoiceField(qs, initial=pk_value, required=False, widget=HiddenInput)
         super(BaseModelFormSet, self).add_fields(form, index)
@@ -848,7 +925,7 @@ class InlineForeignKeyField(Field):
         kwargs["widget"] = InlineForeignKeyHiddenInput
         super(InlineForeignKeyField, self).__init__(*args, **kwargs)
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         if value in EMPTY_VALUES:
             if self.pk_field:
                 return None
@@ -913,7 +990,11 @@ class ModelChoiceField(ChoiceField):
         self.queryset = queryset
         self.choice_cache = None
         self.to_field_name = to_field_name
-
+        
+        #DJANGO_SIMPLE
+        #Disabled loading of related entities into drop down lists on model forms
+        self.choices = []
+        
     def __deepcopy__(self, memo):
         result = super(ChoiceField, self).__deepcopy__(memo)
         # Need to force a new ModelChoiceIterator to be created, bug #11183
@@ -995,7 +1076,7 @@ class ModelMultipleChoiceField(ModelChoiceField):
             cache_choices, required, widget, label, initial, help_text,
             *args, **kwargs)
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         if self.required and not value:
             raise ValidationError(self.error_messages['required'])
         elif not self.required and not value:

@@ -35,7 +35,13 @@ class Serializer(base.Serializer):
         self._current = None
 
     def handle_field(self, obj, field):
-        value = field._get_val_from_obj(obj)
+        #DJANGO_SIMPLE
+        #Patch to support missing fields on models due to parent class 
+        #switching needed for PolyModel implementation
+        try:
+            value = field._get_val_from_obj(obj)
+        except AttributeError:
+            value = None
         # Protected types (i.e., primitives like None, numbers, dates,
         # and Decimals) are passed through as is. All other values are
         # converted to string first.
@@ -45,6 +51,10 @@ class Serializer(base.Serializer):
             self._current[field.name] = field.value_to_string(obj)
 
     def handle_fk_field(self, obj, field):
+        #DJANGO_SIMPLE
+        #Overridden to not query the object, but instead just serialize the model_id field
+        related = getattr(obj, '%s_id' % field.name, None)
+        '''
         related = getattr(obj, field.name)
         if related is not None:
             if self.use_natural_keys and hasattr(related, 'natural_key'):
@@ -56,16 +66,30 @@ class Serializer(base.Serializer):
                 else:
                     # Related to remote object via other field
                     related = smart_unicode(getattr(related, field.rel.field_name), strings_only=True)
+        '''
         self._current[field.name] = related
 
     def handle_m2m_field(self, obj, field):
         if field.rel.through._meta.auto_created:
             if self.use_natural_keys and hasattr(field.rel.to, 'natural_key'):
                 m2m_value = lambda value: value.natural_key()
+                self._current[field.name] = [m2m_value(related)
+                           for related in getattr(obj, field.name).iterator()]
+            elif field.rel.get_related_field().primary_key:
+                m2m_value = lambda value: smart_unicode(
+                    getattr(value, related_query.target_field_name + '_id'),
+                    strings_only=True)
+                related_query = getattr(obj, field.name)
+                filters = {related_query.source_field_name: obj._get_pk_val()}
+                query = field.rel.through.objects.filter(**filters)
+                self._current[field.name] = sorted((m2m_value(m2m_entity)
+                                                    for m2m_entity in query),
+                                                   reverse=True)
             else:
-                m2m_value = lambda value: smart_unicode(value._get_pk_val(), strings_only=True)
-            self._current[field.name] = [m2m_value(related)
-                               for related in getattr(obj, field.name).iterator()]
+                m2m_value = lambda value: smart_unicode(value._get_pk_val(),
+                                                        strings_only=True)
+                self._current[field.name] = [m2m_value(related)
+                           for related in getattr(obj, field.name).iterator()]
 
     def getvalue(self):
         return self.objects

@@ -12,11 +12,8 @@ class USStateField(CharField):
         kwargs['choices'] = STATE_CHOICES
         kwargs['max_length'] = 2
         super(USStateField, self).__init__(*args, **kwargs)
-
 class USPostalCodeField(CharField):
-
     description = _("U.S. postal code (two uppercase letters)")
-
     def __init__(self, *args, **kwargs):
         kwargs['choices'] = USPS_CHOICES
         kwargs['max_length'] = 2

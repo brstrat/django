@@ -5,7 +5,7 @@ from django.contrib.sites.models import get_current_site
 from django.template import Context, loader
 from django import forms
 from django.utils.translation import ugettext_lazy as _
-from django.utils.http import int_to_base36
+from django.utils.http import urlsafe_base64_encode
 
 class UserCreationForm(forms.ModelForm):
     """
@@ -63,7 +63,8 @@ class AuthenticationForm(forms.Form):
     Base class for authenticating users. Extend this to get a form that accepts
     username/password logins.
     """
-    username = forms.CharField(label=_("Username"), max_length=30)
+    # DJANGO_SIMPLE we use EmailField for username which is 75 by default (was 30)
+    username = forms.CharField(label=_("Username"), max_length=75)
     password = forms.CharField(label=_("Password"), widget=forms.PasswordInput)
 
     def __init__(self, request=None, *args, **kwargs):
@@ -138,7 +139,7 @@ class PasswordResetForm(forms.Form):
                 'email': user.email,
                 'domain': domain,
                 'site_name': site_name,
-                'uid': int_to_base36(user.id),
+                'uid': urlsafe_base64_encode(str(user.id)),
                 'user': user,
                 'token': token_generator.make_token(user),
                 'protocol': use_https and 'https' or 'http',

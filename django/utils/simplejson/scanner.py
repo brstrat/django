@@ -2,9 +2,12 @@
 """
 import re
 try:
-    from simplejson._speedups import make_scanner as c_make_scanner
-except ImportError:
-    c_make_scanner = None
+    from json._speedups import make_scanner as c_make_scanner
+except:
+    try:
+        from simplejson._speedups import make_scanner as c_make_scanner
+    except ImportError:
+        c_make_scanner = None
 
 __all__ = ['make_scanner']
 

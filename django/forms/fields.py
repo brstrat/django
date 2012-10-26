@@ -25,11 +25,17 @@ from django.utils.functional import lazy
 # Provide this import for backwards compatibility.
 from django.core.validators import EMPTY_VALUES
 
+# DJANGO_SIMPLE
+from dateutil.parser import parse as dateparse
+
 from util import ErrorList
 from widgets import TextInput, PasswordInput, HiddenInput, MultipleHiddenInput, \
         ClearableFileInput, CheckboxInput, Select, NullBooleanSelect, SelectMultiple, \
         DateInput, DateTimeInput, TimeInput, SplitDateTimeWidget, SplitHiddenDateTimeWidget, \
         FILE_INPUT_CONTRADICTION
+
+#DJANGO_SIMPLE
+from widgets import DisplayOnly
 
 __all__ = (
     'Field', 'CharField', 'IntegerField',
@@ -40,7 +46,10 @@ __all__ = (
     'BooleanField', 'NullBooleanField', 'ChoiceField', 'MultipleChoiceField',
     'ComboField', 'MultiValueField', 'FloatField', 'DecimalField',
     'SplitDateTimeField', 'IPAddressField', 'FilePathField', 'SlugField',
-    'TypedChoiceField', 'TypedMultipleChoiceField'
+    'TypedChoiceField', 'TypedMultipleChoiceField',
+
+    #DJANGO_SIMPLE
+    'DisplayOnlyField',
 )
 
 def en_format(name):
@@ -69,10 +78,12 @@ class Field(object):
 
     # Tracks each time a Field instance is created. Used to retain order.
     creation_counter = 0
-
     def __init__(self, required=True, widget=None, label=None, initial=None,
                  help_text=None, error_messages=None, show_hidden_initial=False,
-                 validators=[], localize=False):
+                 validators=[], localize=False, watermark=None, 
+
+                 # DJANGO_SIMPLE
+                 editable=True, filters=None):
         # required -- Boolean that specifies whether the field is required.
         #             True by default.
         # widget -- A Widget class, or instance of a Widget class, that should
@@ -83,7 +94,7 @@ class Field(object):
         #          field in a form. By default, Django will use a "pretty"
         #          version of the form field name, if the Field is part of a
         #          Form.
-        # initial -- A value to use in this Field's initial display. This value
+        # initial -- A value to use in ttomis Field's initial display. This value
         #            is *not* used as a fallback if data isn't given.
         # help_text -- An optional string to use as "help text" for this Field.
         # error_messages -- An optional dictionary to override the default
@@ -92,17 +103,33 @@ class Field(object):
         #                        hidden widget with initial value after widget.
         # validators -- List of addtional validators to use
         # localize -- Boolean that specifies if the field should be localized.
+        # watermark -- Use placeholder instead of label 
         if label is not None:
             label = smart_unicode(label)
+
+        #DJANGO_SIMPLE
+        self.editable = editable
+        if not editable:
+            copy_attrs = {}
+            if widget and widget.attrs:
+                copy_attrs = widget.attrs
+            widget = DisplayOnly(attrs=copy_attrs)
+            required = False
+
         self.required, self.label, self.initial = required, label, initial
+
         self.show_hidden_initial = show_hidden_initial
         if help_text is None:
             self.help_text = u''
         else:
             self.help_text = smart_unicode(help_text)
+
         widget = widget or self.widget
         if isinstance(widget, type):
             widget = widget()
+
+        #DJANGO_SIMPLE
+        self.filters = widget.filters = filters
 
         # Trigger the localization machinery if needed.
         self.localize = localize
@@ -113,10 +140,29 @@ class Field(object):
         widget.is_required = self.required
 
         # Hook into self.widget_attrs() for any Field-specific HTML attributes.
-        extra_attrs = self.widget_attrs(widget)
+        extra_attrs = self.widget_attrs(widget) or {}
+
         if extra_attrs:
             widget.attrs.update(extra_attrs)
+        
+        #DJANGO_SIMPLE
+        #Adds :required class to any required field
+        if ':required' not in widget.attrs.get('class', '') and self.required or 'required' in widget.attrs :
+            required_cls = ' :required'
+            widget.attrs.update({'class': widget.attrs.get('class', '') +required_cls })
+        if watermark:
+            #only override it if its not there
+            if not 'placeholder' in widget.attrs:
+                cls = ' watermark'
+                #if we want to use modernizer go for it...widget.attrs.update({'placeholder':  self.label})
+                new_attrs ={'class': widget.attrs.get('class', '') +cls }
+                if 'title' not in widget.attrs:
+                    new_attrs['title'] = self.label
+                widget.attrs.update(new_attrs)
+            self.label = None
+            self.watermark = watermark
 
+        #END DJANGO_SIMPLE  
         self.widget = widget
 
         # Increase the creation counter, and save our local copy.
@@ -138,6 +184,8 @@ class Field(object):
         return value
 
     def validate(self, value):
+        #import logging
+        #logging.simple("In validate", self.label, value, self.required)
         if value in validators.EMPTY_VALUES and self.required:
             raise ValidationError(self.error_messages['required'])
 
@@ -159,7 +207,7 @@ class Field(object):
         if errors:
             raise ValidationError(errors)
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         """
         Validates the given value and returns its "cleaned" value as an
         appropriate Python object.
@@ -357,11 +405,17 @@ class DateField(Field):
             return value.date()
         if isinstance(value, datetime.date):
             return value
-        for format in self.input_formats or formats.get_format('DATE_INPUT_FORMATS'):
-            try:
-                return datetime.date(*time.strptime(value, format)[:3])
-            except ValueError:
-                continue
+        # DJANGO_SIMPLE
+        # Dateutil parse function for smarter parsing
+        try:
+            return dateparse(value).date()
+        except:
+            #Fall back to django implementation
+            for format in self.input_formats or formats.get_format('DATE_INPUT_FORMATS'):
+                try:
+                    return datetime.date(*time.strptime(value, format)[:3])
+                except ValueError:
+                    continue
         raise ValidationError(self.error_messages['invalid'])
 
 class TimeField(Field):
@@ -419,11 +473,17 @@ class DateTimeField(Field):
             if value[0] in validators.EMPTY_VALUES and value[1] in validators.EMPTY_VALUES:
                 return None
             value = '%s %s' % tuple(value)
-        for format in self.input_formats or formats.get_format('DATETIME_INPUT_FORMATS'):
-            try:
-                return datetime.datetime(*time.strptime(value, format)[:6])
-            except ValueError:
-                continue
+        # DJANGO_SIMPLE
+        # Dateutil parse function for smarter parsing
+        try:
+            return dateparse(value)
+        except:
+            # Fall back to django implementation
+            for format in self.input_formats or formats.get_format('DATETIME_INPUT_FORMATS'):
+                try:
+                    return datetime.datetime(*time.strptime(value, format)[:6])
+                except ValueError:
+                    continue
         raise ValidationError(self.error_messages['invalid'])
 
 class RegexField(CharField):
@@ -450,7 +510,7 @@ class EmailField(CharField):
     }
     default_validators = [validators.validate_email]
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         value = self.to_python(value).strip()
         return super(EmailField, self).clean(value)
 
@@ -489,7 +549,7 @@ class FileField(Field):
 
         return data
 
-    def clean(self, data, initial=None):
+    def clean(self, data, initial=None, *args, **kwargs):
         # If the widget got contradictory inputs, we raise a validation error
         if data is FILE_INPUT_CONTRADICTION:
             raise ValidationError(self.error_messages['contradiction'])
@@ -783,7 +843,7 @@ class ComboField(Field):
             f.required = False
         self.fields = fields
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         """
         Validates the given value against all of self.fields, which is a
         list of Field instances.
@@ -826,7 +886,7 @@ class MultiValueField(Field):
     def validate(self, value):
         pass
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         """
         Validates every value in the given list. A value is validated against
         the corresponding Field in self.fields.
@@ -959,3 +1019,14 @@ class SlugField(CharField):
                      u" underscores or hyphens."),
     }
     default_validators = [validators.validate_slug]
+
+class DisplayOnlyField(Field):
+    widget = DisplayOnly
+
+    def __init__(self, max_length=None, min_length=None, *args, **kwargs):
+        kwargs['editable'] = False
+        kwargs['required'] = False
+        super(DisplayOnlyField, self).__init__(*args, **kwargs)
+
+    def to_python(self, value):
+        return self.widget.static_value

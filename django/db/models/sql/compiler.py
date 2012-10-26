@@ -298,6 +298,7 @@ class SQLCompiler(object):
             ordering = self.query.order_by
         else:
             ordering = self.query.order_by or self.query.model._meta.ordering
+
         qn = self.quote_name_unless_alias
         qn2 = self.connection.ops.quote_name
         distinct = self.query.distinct
@@ -707,6 +708,12 @@ class SQLCompiler(object):
                     ]) + tuple(row[aggregate_end:])
 
                 yield row
+
+    def has_results(self):
+        # This is always executed on a query clone, so we can modify self.query
+        self.query.add_extra({'a': 1}, None, None, None, None, None)
+        self.query.set_extra_mask(('a',))
+        return bool(self.execute_sql(SINGLE))
 
     def execute_sql(self, result_type=MULTI):
         """

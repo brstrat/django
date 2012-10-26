@@ -23,6 +23,9 @@ __all__ = (
     'Select', 'NullBooleanSelect', 'SelectMultiple', 'RadioSelect',
     'CheckboxSelectMultiple', 'MultiWidget',
     'SplitDateTimeWidget',
+
+    #DJANGO_SIMPLE
+    'DisplayOnly', 
 )
 
 MEDIA_TYPES = ('css','js')
@@ -619,7 +622,7 @@ class RadioInput(StrAndUnicode):
         else:
             label_for = ''
         choice_label = conditional_escape(force_unicode(self.choice_label))
-        return mark_safe(u'<label%s>%s %s</label>' % (label_for, self.tag(), choice_label))
+        return mark_safe(u'<label%s>%s <span class="label-text">%s</span></label>' % (label_for, self.tag(), choice_label))
 
     def is_checked(self):
         return self.value == self.choice_value
@@ -709,7 +712,7 @@ class CheckboxSelectMultiple(SelectMultiple):
             option_value = force_unicode(option_value)
             rendered_cb = cb.render(name, option_value)
             option_label = conditional_escape(force_unicode(option_label))
-            output.append(u'<li><label%s>%s %s</label></li>' % (label_for, rendered_cb, option_label))
+            output.append(u'<li><label%s>%s <span class="label-text">%s</span></label></li>' % (label_for, rendered_cb, option_label))
         output.append(u'</ul>')
         return mark_safe(u'\n'.join(output))
 
@@ -852,3 +855,26 @@ class SplitHiddenDateTimeWidget(SplitDateTimeWidget):
         for widget in self.widgets:
             widget.input_type = 'hidden'
             widget.is_hidden = True
+
+class DisplayOnly(Widget):
+    """
+    Display value only, no input
+    """
+    static_value = None
+    def render(self, name, value, attrs=None):
+        value = self.static_value or value
+        if self.filters:
+            from app.templatetags.filters import apply_filter
+            value = apply_filter(value, self.filters)
+
+        if value is None:
+            value = ''
+        final_attrs = self.build_attrs(attrs)
+
+        value = conditional_escape(force_unicode(value))
+
+        return mark_safe(u'<span%s>%s</span>' % (flatatt(final_attrs), value))
+
+    def value_from_datadict(self, *args, **kwargs):
+        # Always returns the instance value regardless if bound status
+        return self.static_value

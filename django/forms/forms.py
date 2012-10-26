@@ -71,7 +71,7 @@ class BaseForm(StrAndUnicode):
     # class, not to the Form class.
     def __init__(self, data=None, files=None, auto_id='id_%s', prefix=None,
                  initial=None, error_class=ErrorList, label_suffix=':',
-                 empty_permitted=False):
+                 empty_permitted=False, *args, **kwargs):
         self.is_bound = data is not None or files is not None
         self.data = data or {}
         self.files = files or {}
@@ -127,13 +127,17 @@ class BaseForm(StrAndUnicode):
 
         Subclasses may wish to override.
         """
-        return self.prefix and ('%s-%s' % (self.prefix, field_name)) or field_name
+        #DJANGO_SIMPLE
+        #return self.prefix and ('%s-%s' % (self.prefix, field_name)) or field_name
+        return self.prefix and ('%s__%s' % (self.prefix, field_name)) or field_name
 
     def add_initial_prefix(self, field_name):
         """
         Add a 'initial' prefix for checking dynamic initial values
         """
-        return u'initial-%s' % self.add_prefix(field_name)
+        #DJANGO_SIMPLE
+        #return u'initial-%s' % self.add_prefix(field_name)
+        return u'initial__%s' % self.add_prefix(field_name)
 
     def _html_output(self, normal_row, error_row, row_ender, help_text_html, errors_on_separate_row):
         "Helper function for outputting HTML. Used by as_table(), as_ul(), as_p()."
@@ -277,11 +281,8 @@ class BaseForm(StrAndUnicode):
             # widgets split data over several HTML fields.
             value = field.widget.value_from_datadict(self.data, self.files, self.add_prefix(name))
             try:
-                if isinstance(field, FileField):
-                    initial = self.initial.get(name, field.initial)
-                    value = field.clean(value, initial)
-                else:
-                    value = field.clean(value)
+                initial = self.initial.get(name, field.initial)
+                value = field.clean(value, initial=initial)
                 self.cleaned_data[name] = value
                 if hasattr(self, 'clean_%s' % name):
                     value = getattr(self, 'clean_%s' % name)()
@@ -389,16 +390,24 @@ class Form(BaseForm):
 class BoundField(StrAndUnicode):
     "A Field plus data"
     def __init__(self, form, field, name):
+        
         self.form = form
         self.field = field
         self.name = name
         self.html_name = form.add_prefix(name)
         self.html_initial_name = form.add_initial_prefix(name)
         self.html_initial_id = form.add_initial_prefix(self.auto_id)
-        if self.field.label is None:
-            self.label = pretty_name(name)
+        #SIMPLE
+        has_placeholder = (field.widget.attrs.get('title', False) or field.widget.attrs.get('placeholder', False)) and getattr(field, 'watermark', False)
+        show_label  = getattr(field, 'show_label', False)
+        #SIMPLE
+        if not has_placeholder or show_label:
+            if self.field.label is None:
+                self.label = pretty_name(name)
+            else:
+                self.label = self.field.label
         else:
-            self.label = self.field.label
+            self.label = None
         self.help_text = field.help_text or ''
 
     def __unicode__(self):

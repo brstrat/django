@@ -13,7 +13,6 @@ from django.db.models.query_utils import QueryWrapper
 from django.conf import settings
 from django import forms
 from django.core import exceptions, validators
-from django.utils.datastructures import DictWrapper
 from django.utils.functional import curry
 from django.utils.text import capfirst
 from django.utils.translation import ugettext_lazy as _
@@ -26,6 +25,9 @@ class NOT_PROVIDED:
 # The values to use for "blank" in SelectFields. Will be appended to the start of most "choices" lists.
 BLANK_CHOICE_DASH = [("", "---------")]
 BLANK_CHOICE_NONE = [("", "None")]
+
+#DJANGO_SIMPLE
+BLANK_CHOICE_BLANK= [("", "")]
 
 class FieldDoesNotExist(Exception):
     pass
@@ -215,11 +217,11 @@ class Field(object):
         # mapped to one of the built-in Django field types. In this case, you
         # can implement db_type() instead of get_internal_type() to specify
         # exactly which wacky database column type you want to use.
-        data = DictWrapper(self.__dict__, connection.ops.quote_name, "qn_")
-        try:
-            return connection.creation.data_types[self.get_internal_type()] % data
-        except KeyError:
-            return None
+        return connection.creation.db_type(self)
+
+    def related_db_type(self, connection):
+        # This is the db_type used by a ForeignKey.
+        return connection.creation.related_db_type(self)
 
     def unique(self):
         return self._unique or self.primary_key
@@ -251,6 +253,9 @@ class Field(object):
 
     def get_internal_type(self):
         return self.__class__.__name__
+
+    def get_related_internal_type(self):
+        return self.get_internal_type()
 
     def pre_save(self, model_instance, add):
         "Returns field's value just before saving."
@@ -356,7 +361,9 @@ class Field(object):
     def get_validator_unique_lookup_type(self):
         return '%s__exact' % self.name
 
-    def get_choices(self, include_blank=True, blank_choice=BLANK_CHOICE_DASH):
+    #DJANGO_SIMPLE
+    #def get_choices(self, include_blank=True, blank_choice=BLANK_CHOICE_DASH):
+    def get_choices(self, include_blank=True, blank_choice=BLANK_CHOICE_BLANK):
         """Returns choices with a default blank choices included, for use
         as SelectField choices for this field."""
         first_choice = include_blank and blank_choice or []
@@ -372,7 +379,9 @@ class Field(object):
     def get_choices_default(self):
         return self.get_choices()
 
-    def get_flatchoices(self, include_blank=True, blank_choice=BLANK_CHOICE_DASH):
+    #DJANGO_SIMPLE
+    #def get_flatchoices(self, include_blank=True, blank_choice=BLANK_CHOICE_DASH):
+    def get_flatchoices(self, include_blank=True, blank_choice=BLANK_CHOICE_BLANK):
         "Returns flattened choices with a default blank choice included."
         first_choice = include_blank and blank_choice or []
         return first_choice + list(self.flatchoices)
@@ -445,7 +454,7 @@ class Field(object):
 
     def value_from_object(self, obj):
         "Returns the value of this field in the given model instance."
-        return getattr(obj, self.attname)
+        return getattr(obj, self.attname, None) #DJANGO_SIMPLE added None as default
 
 class AutoField(Field):
     description = _("Integer")
@@ -462,21 +471,31 @@ class AutoField(Field):
     def get_internal_type(self):
         return "AutoField"
 
+    def get_related_internal_type(self):
+        return "RelatedAutoField"
+
+    def related_db_type(self, connection):
+        db_type = super(AutoField, self).related_db_type(connection=connection)
+        if db_type is None:
+            return IntegerField().db_type(connection=connection)
+        return db_type
+
     def to_python(self, value):
-        if value is None:
-            return value
-        try:
-            return int(value)
-        except (TypeError, ValueError):
+        if not (value is None or isinstance(value, (basestring, int, long))):
             raise exceptions.ValidationError(self.error_messages['invalid'])
+        return value
 
     def validate(self, value, model_instance):
         pass
 
     def get_prep_value(self, value):
-        if value is None:
-            return None
-        return int(value)
+        return value
+
+    def get_db_prep_value(self, value, connection, prepared=False):
+        # Casts AutoField into the format expected by the backend
+        if not prepared:
+            value = self.get_prep_value(value)
+        return connection.ops.value_to_db_auto(value)
 
     def contribute_to_class(self, cls, name):
         assert not cls._meta.has_auto_field, "A model can't have more than one AutoField."
@@ -711,7 +730,9 @@ class DateTimeField(DateField):
 
     def pre_save(self, model_instance, add):
         if self.auto_now or (self.auto_now_add and add):
-            value = datetime.datetime.now()
+            #DJANGO_SIMPLE
+            #value = datetime.datetime.now()
+            value = datetime.datetime.utcnow()
             setattr(model_instance, self.attname, value)
             return value
         else:
@@ -979,6 +1000,12 @@ class NullBooleanField(Field):
 class PositiveIntegerField(IntegerField):
     description = _("Integer")
 
+    def related_db_type(self, connection):
+        if not connection.features.related_fields_match_type:
+            return IntegerField().related_db_type(connection=connection)
+        return super(PositiveIntegerField, self).related_db_type(
+            connection=connection)
+
     def get_internal_type(self):
         return "PositiveIntegerField"
 
@@ -989,6 +1016,13 @@ class PositiveIntegerField(IntegerField):
 
 class PositiveSmallIntegerField(IntegerField):
     description = _("Integer")
+
+    def related_db_type(self, connection):
+        if not connection.features.related_fields_match_type:
+            return IntegerField().related_db_type(connection=connection)
+        return super(PositiveSmallIntegerField, self).related_db_type(
+            connection=connection)
+
     def get_internal_type(self):
         return "PositiveSmallIntegerField"
 

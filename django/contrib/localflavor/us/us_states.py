@@ -8,7 +8,6 @@ This exists in this standalone file so that it's only imported into memory
 when explicitly needed.
 """
 
-# The 48 contiguous states, plus the District of Columbia.
 CONTIGUOUS_STATES = (
     ('AL', 'Alabama'),
     ('AZ', 'Arizona'),
@@ -60,8 +59,6 @@ CONTIGUOUS_STATES = (
     ('WI', 'Wisconsin'),
     ('WY', 'Wyoming'),
 )
-
-# All 50 states, plus the District of Columbia.
 US_STATES = (
     ('AL', 'Alabama'),
     ('AK', 'Alaska'),
@@ -140,7 +137,6 @@ COFA_STATES = (
     ('MH', 'Marshall Islands'),
     ('PW', 'Palau'),
 )
-
 # Obsolete abbreviations (no longer US territories/USPS service, or
 # code changed).
 OBSOLETE_STATES = (

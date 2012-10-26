@@ -1,6 +1,6 @@
 import imp
 import re
-from inspect import getargspec
+from inspect import getargspec, isclass
 
 from django.conf import settings
 from django.template.context import Context, RequestContext, ContextPopException
@@ -14,6 +14,7 @@ from django.utils.safestring import SafeData, EscapeData, mark_safe, mark_for_es
 from django.utils.formats import localize
 from django.utils.html import escape
 from django.utils.module_loading import module_has_submodule
+import logging
 
 
 TOKEN_TEXT = 0
@@ -59,6 +60,10 @@ class TemplateSyntaxError(Exception):
     pass
 
 class TemplateDoesNotExist(Exception):
+    pass
+
+#SIMPLE
+class ParseTemplateDoesNotExist(TemplateDoesNotExist):
     pass
 
 class TemplateEncodingError(Exception):
@@ -240,6 +245,9 @@ class Parser(object):
                 except TemplateSyntaxError, e:
                     if not self.compile_function_error(token, e):
                         raise
+                except TemplateDoesNotExist, se:
+                    logging.error("Template references another template that can not be found %s" %token, exc_info=1)
+                    raise ParseTemplateDoesNotExist(se)
                 self.extend_nodelist(nodelist, compiled_result, token)
                 self.exit_command()
         if parse_until:
@@ -532,6 +540,8 @@ class FilterExpression(object):
                     arg_vals.append(arg.resolve(context))
             if getattr(func, 'needs_autoescape', False):
                 new_obj = func(obj, autoescape=context.autoescape, *arg_vals)
+            elif getattr(func, 'takes_context', False):
+                new_obj = func(obj, _context=context, *arg_vals)
             else:
                 new_obj = func(obj, *arg_vals)
             if getattr(func, 'is_safe', False) and isinstance(obj, SafeData):
@@ -690,7 +700,10 @@ class Variable(object):
                                 TypeError,  # unsubscriptable object
                                 ):
                             raise VariableDoesNotExist("Failed lookup for key [%s] in %r", (bit, current)) # missing attribute
-                if callable(current):
+                # DJANGO_SIMPLE
+                # Don't auto instantiate classes
+                if callable(current) and not isclass(current):
+                #if callable(current):
                     if getattr(current, 'alters_data', False):
                         current = settings.TEMPLATE_STRING_IF_INVALID
                     else:
@@ -839,30 +852,41 @@ class Library(object):
         self.tags[getattr(func, "_decorated_function", func).__name__] = func
         return func
 
-    def filter(self, name=None, filter_func=None):
+    def filter(self, name=None, filter_func=None, takes_context=False):
+        _func = None
+        _self_filter_func = self.filter_function_with_context if takes_context else self.filter_function
+        
         if name == None and filter_func == None:
             # @register.filter()
-            return self.filter_function
+            _func = _self_filter_func
         elif filter_func == None:
             if(callable(name)):
                 # @register.filter
-                return self.filter_function(name)
+                _func =  _self_filter_func(name)
             else:
                 # @register.filter('somename') or @register.filter(name='somename')
                 def dec(func):
                     return self.filter(name, func)
-                return dec
+                _func =  dec
         elif name != None and filter_func != None:
             # register.filter('somename', somefunc)
+            filter_func.takes_context = takes_context
             self.filters[name] = filter_func
-            return filter_func
+            _func =  filter_func
         else:
             raise InvalidTemplateLibrary("Unsupported arguments to Library.filter: (%r, %r)", (name, filter_func))
+        
+        return _func
 
     def filter_function(self, func):
         self.filters[getattr(func, "_decorated_function", func).__name__] = func
         return func
-
+    
+    def filter_function_with_context(self, func):
+        func = self.filter_function(func)
+        func.takes_context = True
+        return func
+    
     def simple_tag(self, func=None, takes_context=None):
         def dec(func):
             params, xx, xxx, defaults = getargspec(func)

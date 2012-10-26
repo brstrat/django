@@ -83,7 +83,7 @@ class Permission(models.Model):
         verbose_name = _('permission')
         verbose_name_plural = _('permissions')
         unique_together = (('content_type', 'codename'),)
-        ordering = ('content_type__app_label', 'content_type__model', 'codename')
+        ordering = ('codename',)
 
     def __unicode__(self):
         return u"%s | %s | %s" % (
@@ -214,9 +214,11 @@ class User(models.Model):
     is_superuser = models.BooleanField(_('superuser status'), default=False, help_text=_("Designates that this user has all permissions without explicitly assigning them."))
     last_login = models.DateTimeField(_('last login'), default=datetime.datetime.now)
     date_joined = models.DateTimeField(_('date joined'), default=datetime.datetime.now)
-    groups = models.ManyToManyField(Group, verbose_name=_('groups'), blank=True,
-        help_text=_("In addition to the permissions manually assigned, this user will also get all permissions granted to each group he/she is in."))
-    user_permissions = models.ManyToManyField(Permission, verbose_name=_('user permissions'), blank=True)
+    # DJANGO_SIMPLE
+    # Disabled in favor of permission_backend_nonrel utils
+    #groups = models.ManyToManyField(Group, verbose_name=_('groups'), blank=True,
+    #    help_text=_("In addition to the permissions manually assigned, this user will also get all permissions granted to each group he/she is in."))
+    #user_permissions = models.ManyToManyField(Permission, verbose_name=_('user permissions'), blank=True)
     objects = UserManager()
 
     class Meta:

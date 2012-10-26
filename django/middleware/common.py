@@ -55,17 +55,40 @@ class CommonMiddleware(object):
         host = request.get_host()
         old_url = [host, request.path]
         new_url = old_url[:]
-
+        modified_path = request.path_info
+        
         if (settings.PREPEND_WWW and old_url[0] and
                 not old_url[0].startswith('www.')):
             new_url[0] = 'www.' + old_url[0]
+                    
+        # DJANGO_SIMPLE
+        # Strip trailing %20 from url if STRIP_URL is set and 
+        # there is no pattern for the current path
+        if settings.STRIP_URL and (old_url[1] != old_url[1].strip()):
+            urlconf = getattr(request, 'urlconf', None)
+            if (not _is_valid_path(modified_path, urlconf) and
+                    _is_valid_path(modified_path.strip(), urlconf)):
+                new_url[1] = new_url[1].strip()
+                if settings.DEBUG and request.method == 'POST':
+                    raise RuntimeError, (""
+                    "You called this URL via POST, but the URL doesn't end "
+                    "in a slash and you have STRIP_URL set. Django can't "
+                    "redirect to the slash URL while maintaining POST data. "
+                    "Change your form to point to %s%s (note the trailing "
+                    "slash), or set STRIP_URL=False in your Django "
+                    "settings.") % (new_url[0], new_url[1])
+            else:
+                # If neither origin or stripped url matches, continue with the stripped version
+                # Otherwise trailing slash check will try ".../foo /"
+                modified_path, new_url[1], old_url[1] = map(lambda x: x.strip(), 
+                                                            (modified_path, new_url[1], old_url[1]))
 
         # Append a slash if APPEND_SLASH is set and the URL doesn't have a
         # trailing slash and there is no pattern for the current path
         if settings.APPEND_SLASH and (not old_url[1].endswith('/')):
             urlconf = getattr(request, 'urlconf', None)
-            if (not _is_valid_path(request.path_info, urlconf) and
-                    _is_valid_path("%s/" % request.path_info, urlconf)):
+            if (not _is_valid_path(modified_path, urlconf) and
+                    _is_valid_path("%s/" % modified_path, urlconf)):
                 new_url[1] = new_url[1] + '/'
                 if settings.DEBUG and request.method == 'POST':
                     raise RuntimeError, (""

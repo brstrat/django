@@ -2,11 +2,25 @@ from django.conf import settings
 from django.contrib.messages import constants
 from django.contrib.messages.storage.base import BaseStorage, Message
 from django.http import SimpleCookie
-from django.utils import simplejson as json
+try:
+    import json
+except:
+    from django.utils import simplejson as json
+
+try:
+    from json.encoder import JSONEncoder
+except:
+    import simplejson.JSONEncoder as JSONEncoder
+    
+try:
+    from json.decoder import JSONDecoder
+except:
+    import simplejson.JSONDecoder as JSONDecoder
+    
 from django.utils.crypto import salted_hmac, constant_time_compare
 
 
-class MessageEncoder(json.JSONEncoder):
+class MessageEncoder(JSONEncoder):
     """
     Compactly serializes instances of the ``Message`` class as JSON.
     """
@@ -21,7 +35,7 @@ class MessageEncoder(json.JSONEncoder):
         return super(MessageEncoder, self).default(obj)
 
 
-class MessageDecoder(json.JSONDecoder):
+class MessageDecoder(JSONDecoder):
     """
     Decodes JSON that includes serialized ``Message`` instances.
     """

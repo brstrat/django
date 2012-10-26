@@ -5,6 +5,8 @@ from django.core import signals
 from django.utils.encoding import force_unicode
 from django.utils.importlib import import_module
 from django.utils.log import getLogger
+import logging
+
 
 logger = getLogger('django.request')
 
@@ -44,6 +46,7 @@ class BaseHandler(object):
             try:
                 mod = import_module(mw_module)
             except ImportError, e:
+                logging.error('Exception in loading %s'% mw_module, exc_info=1)
                 raise exceptions.ImproperlyConfigured('Error importing middleware %s: "%s"' % (mw_module, e))
             try:
                 mw_class = getattr(mod, mw_classname)
@@ -72,6 +75,7 @@ class BaseHandler(object):
     def get_response(self, request):
         "Returns an HttpResponse object for the given HttpRequest"
         from django.core import exceptions, urlresolvers
+        from django_simple._core.urlresolvers import SimpleRegexURLResolver as RegexURLResolver #SIMPLE
         from django.conf import settings
 
         try:
@@ -81,7 +85,10 @@ class BaseHandler(object):
             # resolver is set
             urlconf = settings.ROOT_URLCONF
             urlresolvers.set_urlconf(urlconf)
-            resolver = urlresolvers.RegexURLResolver(r'^/', urlconf)
+            resolver = RegexURLResolver(r'^/', urlconf)
+
+            #logging.debug('resolver : %s' % resolver )
+
             try:
                 response = None
                 # Apply request middleware
@@ -95,10 +102,14 @@ class BaseHandler(object):
                         # Reset url resolver with a custom urlconf.
                         urlconf = request.urlconf
                         urlresolvers.set_urlconf(urlconf)
-                        resolver = urlresolvers.RegexURLResolver(r'^/', urlconf)
+                        resolver = RegexURLResolver(r'^/', urlconf)
+
+                    #logging.debug('resolver : %s' % resolver )
 
                     callback, callback_args, callback_kwargs = resolver.resolve(
                             request.path_info)
+
+                    #logging.debug('callback is %s' % resolver)
 
                     # Apply view middleware
                     for middleware_method in self._view_middleware:
@@ -133,7 +144,7 @@ class BaseHandler(object):
                 if hasattr(response, 'render') and callable(response.render):
                     for middleware_method in self._template_response_middleware:
                         response = middleware_method(request, response)
-                    response.render()
+                    response = response.render()
 
             except http.Http404, e:
                 logger.warning('Not Found: %s' % request.path,
@@ -214,7 +225,11 @@ class BaseHandler(object):
         if resolver.urlconf_module is None:
             raise exc_info[1], None, exc_info[2]
         # Return an HttpResponse that displays a friendly error message.
-        callback, param_dict = resolver.resolve500()
+        from django_simple._core.urlresolvers import SimpleRegexURLResolver
+        if isinstance(resolver, SimpleRegexURLResolver):
+            callback, param_dict = resolver.resolve500(path=request.path)
+        else: 
+            callback, param_dict = resolver.resolve500()
         return callback(request, **param_dict)
 
     def apply_response_fixes(self, request, response):

@@ -22,6 +22,7 @@ from django.db.models.sql.expressions import SQLEvaluator
 from django.db.models.sql.where import (WhereNode, Constraint, EverythingNode,
     ExtraWhere, AND, OR)
 from django.core.exceptions import FieldError
+import logging
 
 __all__ = ['Query', 'RawQuery']
 
@@ -359,7 +360,10 @@ class Query(object):
             self.remove_inherited_models()
 
         query.clear_ordering(True)
-        query.clear_limits()
+        #DJANGO_SIMPLE
+        #removed to preserve limiting queryseys for counts
+        #e.g. Model.objects.all()[:30].count()
+        #query.clear_limits()
         query.select_related = False
         query.related_select_cols = []
         query.related_select_fields = []
@@ -411,17 +415,15 @@ class Query(object):
 
     def has_results(self, using):
         q = self.clone()
-        q.add_extra({'a': 1}, None, None, None, None, None)
         q.select = []
         q.select_fields = []
         q.default_cols = False
         q.select_related = False
-        q.set_extra_mask(('a',))
         q.set_aggregate_mask(())
         q.clear_ordering(True)
         q.set_limits(high=1)
         compiler = q.get_compiler(using=using)
-        return bool(compiler.execute_sql(SINGLE))
+        return compiler.has_results()
 
     def combine(self, rhs, connector):
         """

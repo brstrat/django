@@ -114,6 +114,8 @@ def get_commands():
         for app_name in apps:
             try:
                 path = find_management_module(app_name)
+                if path.endswith('.py'):
+                    continue
                 _commands.update(dict([(name, app_name)
                                        for name in find_commands(path)]))
             except ImportError:
