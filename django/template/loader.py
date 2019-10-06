@@ -26,14 +26,11 @@
 # installed, because pkg_resources is necessary to read eggs.
 
 from django.core.exceptions import ImproperlyConfigured
-from django.template.base import Origin, Template, Context, TemplateDoesNotExist, add_to_builtins,\
-    ParseTemplateDoesNotExist
+from django.template.base import Origin, Template, Context, TemplateDoesNotExist, add_to_builtins
 from django.utils.importlib import import_module
 from django.conf import settings
-import logging
-template_source_loaders = None
 
-from itertools import chain
+template_source_loaders = None
 
 class BaseLoader(object):
     is_usable = False
@@ -56,9 +53,6 @@ class BaseLoader(object):
             # This allows for correct identification (later) of the actual template that does
             # not exist.
             return source, display_name
-        except ParseTemplateDoesNotExist:
-            raise
-            
 
     def load_template_source(self, template_name, template_dirs=None):
         """
@@ -143,18 +137,6 @@ def find_template(name, dirs=None):
             pass
     raise TemplateDoesNotExist(name)
 
-def find_template_source(name, dirs=None):
-    # For backward compatibility
-    import warnings
-    warnings.warn(
-        "`django.template.loader.find_template_source` is deprecated; use `django.template.loader.find_template` instead.",
-        DeprecationWarning
-    )
-    template, origin = find_template(name, dirs)
-    if hasattr(template, 'render'):
-        raise Exception("Found a compiled template that is incompatible with the deprecated `django.template.loader.find_template_source` function.")
-    return template, origin
-
 def get_template(template_name):
     """
     Returns a compiled Template object for the given template name,
@@ -181,19 +163,10 @@ def render_to_string(template_name, dictionary=None, context_instance=None):
     the templates in the list. Returns a string.
     """
     dictionary = dictionary or {}
-    # DJANGO_SIMPLE
-    # Iterate over chain also
-    if isinstance(template_name, (list, tuple, chain)):
+    if isinstance(template_name, (list, tuple)):
         t = select_template(template_name)
     else:
         t = get_template(template_name)
-    
-    #DJANGO_SIMPLE
-    try:
-        logging.debug('=Loading template %s' % t.name)
-    except:
-        pass
-    
     if not context_instance:
         return t.render(Context(dictionary))
     # Add the dictionary to the context stack, ensuring it gets removed again
@@ -206,6 +179,8 @@ def render_to_string(template_name, dictionary=None, context_instance=None):
 
 def select_template(template_name_list):
     "Given a list of template names, returns the first that can be loaded."
+    if not template_name_list:
+        raise TemplateDoesNotExist("No template names provided")
     not_found = []
     for template_name in template_name_list:
         try:

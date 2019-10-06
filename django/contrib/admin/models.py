@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.contenttypes.models import ContentType
+from django.contrib.auth.models import User
 from django.contrib.admin.util import quote
 from django.utils.translation import ugettext_lazy as _
 from django.utils.encoding import smart_unicode
@@ -16,13 +17,15 @@ class LogEntryManager(models.Manager):
 
 class LogEntry(models.Model):
     action_time = models.DateTimeField(_('action time'), auto_now=True)
-    user = models.ForeignKey('common.User')
+    user = models.ForeignKey(User)
     content_type = models.ForeignKey(ContentType, blank=True, null=True)
     object_id = models.TextField(_('object id'), blank=True, null=True)
     object_repr = models.CharField(_('object repr'), max_length=200)
     action_flag = models.PositiveSmallIntegerField(_('action flag'))
     change_message = models.TextField(_('change message'), blank=True)
+
     objects = LogEntryManager()
+
     class Meta:
         verbose_name = _('log entry')
         verbose_name_plural = _('log entries')
@@ -31,6 +34,16 @@ class LogEntry(models.Model):
 
     def __repr__(self):
         return smart_unicode(self.action_time)
+
+    def __unicode__(self):
+        if self.action_flag == ADDITION:
+            return _('Added "%(object)s".') % {'object': self.object_repr}
+        elif self.action_flag == CHANGE:
+            return _('Changed "%(object)s" - %(changes)s') % {'object': self.object_repr, 'changes': self.change_message}
+        elif self.action_flag == DELETION:
+            return _('Deleted "%(object)s."') % {'object': self.object_repr}
+
+        return _('LogEntry Object')
 
     def is_addition(self):
         return self.action_flag == ADDITION

@@ -2,16 +2,19 @@
 Form classes
 """
 
+from __future__ import absolute_import
+
+import copy
+
 from django.core.exceptions import ValidationError
-from django.utils.copycompat import deepcopy
+from django.forms.fields import Field, FileField
+from django.forms.util import flatatt, ErrorDict, ErrorList
+from django.forms.widgets import Media, media_property, TextInput, Textarea
 from django.utils.datastructures import SortedDict
 from django.utils.html import conditional_escape
 from django.utils.encoding import StrAndUnicode, smart_unicode, force_unicode
 from django.utils.safestring import mark_safe
 
-from fields import Field, FileField
-from widgets import Media, media_property, TextInput, Textarea
-from util import flatatt, ErrorDict, ErrorList
 
 __all__ = ('BaseForm', 'Form')
 
@@ -71,7 +74,7 @@ class BaseForm(StrAndUnicode):
     # class, not to the Form class.
     def __init__(self, data=None, files=None, auto_id='id_%s', prefix=None,
                  initial=None, error_class=ErrorList, label_suffix=':',
-                 empty_permitted=False, *args, **kwargs):
+                 empty_permitted=False):
         self.is_bound = data is not None or files is not None
         self.data = data or {}
         self.files = files or {}
@@ -89,14 +92,14 @@ class BaseForm(StrAndUnicode):
         # alter self.fields, we create self.fields here by copying base_fields.
         # Instances should always modify self.fields; they should not modify
         # self.base_fields.
-        self.fields = deepcopy(self.base_fields)
+        self.fields = copy.deepcopy(self.base_fields)
 
     def __unicode__(self):
         return self.as_table()
 
     def __iter__(self):
-        for name, field in self.fields.items():
-            yield BoundField(self, field, name)
+        for name in self.fields:
+            yield self[name]
 
     def __getitem__(self, name):
         "Returns a BoundField with the given name."
@@ -127,17 +130,13 @@ class BaseForm(StrAndUnicode):
 
         Subclasses may wish to override.
         """
-        #DJANGO_SIMPLE
-        #return self.prefix and ('%s-%s' % (self.prefix, field_name)) or field_name
-        return self.prefix and ('%s__%s' % (self.prefix, field_name)) or field_name
+        return self.prefix and ('%s-%s' % (self.prefix, field_name)) or field_name
 
     def add_initial_prefix(self, field_name):
         """
         Add a 'initial' prefix for checking dynamic initial values
         """
-        #DJANGO_SIMPLE
-        #return u'initial-%s' % self.add_prefix(field_name)
-        return u'initial__%s' % self.add_prefix(field_name)
+        return u'initial-%s' % self.add_prefix(field_name)
 
     def _html_output(self, normal_row, error_row, row_ender, help_text_html, errors_on_separate_row):
         "Helper function for outputting HTML. Used by as_table(), as_ul(), as_p()."
@@ -146,7 +145,7 @@ class BaseForm(StrAndUnicode):
 
         for name, field in self.fields.items():
             html_class_attr = ''
-            bf = BoundField(self, field, name)
+            bf = self[name]
             bf_errors = self.error_class([conditional_escape(error) for error in bf.errors]) # Escape and cache in local variable.
             if bf.is_hidden:
                 if bf_errors:
@@ -281,8 +280,11 @@ class BaseForm(StrAndUnicode):
             # widgets split data over several HTML fields.
             value = field.widget.value_from_datadict(self.data, self.files, self.add_prefix(name))
             try:
-                initial = self.initial.get(name, field.initial)
-                value = field.clean(value, initial=initial)
+                if isinstance(field, FileField):
+                    initial = self.initial.get(name, field.initial)
+                    value = field.clean(value, initial)
+                else:
+                    value = field.clean(value)
                 self.cleaned_data[name] = value
                 if hasattr(self, 'clean_%s' % name):
                     value = getattr(self, 'clean_%s' % name)()
@@ -356,7 +358,7 @@ class BaseForm(StrAndUnicode):
 
     def is_multipart(self):
         """
-        Returns True if the form needs to be multipart-encrypted, i.e. it has
+        Returns True if the form needs to be multipart-encoded, i.e. it has
         FileInput. Otherwise, False.
         """
         for field in self.fields.values():
@@ -390,24 +392,16 @@ class Form(BaseForm):
 class BoundField(StrAndUnicode):
     "A Field plus data"
     def __init__(self, form, field, name):
-        
         self.form = form
         self.field = field
         self.name = name
         self.html_name = form.add_prefix(name)
         self.html_initial_name = form.add_initial_prefix(name)
         self.html_initial_id = form.add_initial_prefix(self.auto_id)
-        #SIMPLE
-        has_placeholder = (field.widget.attrs.get('title', False) or field.widget.attrs.get('placeholder', False)) and getattr(field, 'watermark', False)
-        show_label  = getattr(field, 'show_label', False)
-        #SIMPLE
-        if not has_placeholder or show_label:
-            if self.field.label is None:
-                self.label = pretty_name(name)
-            else:
-                self.label = self.field.label
+        if self.field.label is None:
+            self.label = pretty_name(name)
         else:
-            self.label = None
+            self.label = self.field.label
         self.help_text = field.help_text or ''
 
     def __unicode__(self):
@@ -415,6 +409,22 @@ class BoundField(StrAndUnicode):
         if self.field.show_hidden_initial:
             return self.as_widget() + self.as_hidden(only_initial=True)
         return self.as_widget()
+
+    def __iter__(self):
+        """
+        Yields rendered strings that comprise all widgets in this BoundField.
+
+        This really is only useful for RadioSelect widgets, so that you can
+        iterate over individual radio buttons in a template.
+        """
+        for subwidget in self.field.widget.subwidgets(self.html_name, self.value()):
+            yield subwidget
+
+    def __len__(self):
+        return len(list(self.__iter__()))
+
+    def __getitem__(self, idx):
+        return list(self.__iter__())[idx]
 
     def _errors(self):
         """
@@ -534,7 +544,7 @@ class BoundField(StrAndUnicode):
 
     def _id_for_label(self):
         """
-        Wrapper around the field widget's `id_for_label` class method.
+        Wrapper around the field widget's `id_for_label` method.
         Useful, for example, for focusing on this field regardless of whether
         it has a single widget or a MutiWidget.
         """

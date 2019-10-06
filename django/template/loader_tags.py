@@ -1,12 +1,8 @@
-from django.template.base import TemplateSyntaxError, TemplateDoesNotExist, Variable,\
-    ParseTemplateDoesNotExist, Template, VariableNode, resolve_variable
-from django.template.base import Library, Node, TextNode
-from django.template.context import Context
-from django.template.defaulttags import token_kwargs
-from django.template.loader import get_template
 from django.conf import settings
+from django.template.base import TemplateSyntaxError, Library, Node, TextNode,\
+    token_kwargs, Variable
+from django.template.loader import get_template
 from django.utils.safestring import mark_safe
-import logging
 
 register = Library()
 
@@ -79,25 +75,23 @@ class BlockNode(Node):
 class ExtendsNode(Node):
     must_be_first = True
 
-    def __init__(self, nodelist, parent_name, parent_name_expr, template_dirs=None):
+    def __init__(self, nodelist, parent_name, template_dirs=None):
         self.nodelist = nodelist
-        self.parent_name, self.parent_name_expr = parent_name, parent_name_expr
+        self.parent_name = parent_name
         self.template_dirs = template_dirs
         self.blocks = dict([(n.name, n) for n in nodelist.get_nodes_by_type(BlockNode)])
 
     def __repr__(self):
-        if self.parent_name_expr:
-            return "<ExtendsNode: extends %s>" % self.parent_name_expr.token
-        return '<ExtendsNode: extends "%s">' % self.parent_name
+        return '<ExtendsNode: extends %s>' % self.parent_name.token
 
     def get_parent(self, context):
-        if self.parent_name_expr:
-            self.parent_name = self.parent_name_expr.resolve(context)
-        parent = self.parent_name
+        parent = self.parent_name.resolve(context)
         if not parent:
             error_msg = "Invalid template name in 'extends' tag: %r." % parent
-            if self.parent_name_expr:
-                error_msg += " Got this from the '%s' variable." % self.parent_name_expr.token
+            if self.parent_name.filters or\
+                    isinstance(self.parent_name.var, Variable):
+                error_msg += " Got this from the '%s' variable." %\
+                    self.parent_name.token
             raise TemplateSyntaxError(error_msg)
         if hasattr(parent, 'render'):
             return parent # parent is a Template object
@@ -150,10 +144,6 @@ class ConstantIncludeNode(BaseIncludeNode):
         try:
             t = get_template(template_path)
             self.template = t
-        except ParseTemplateDoesNotExist, pte:
-            #SIMPLE
-            #DIE!  we reference something that dne
-            raise pte
         except:
             if settings.TEMPLATE_DEBUG:
                 raise
@@ -174,15 +164,12 @@ class IncludeNode(BaseIncludeNode):
             template_name = self.template_name.resolve(context)
             template = get_template(template_name)
             return self.render_template(template, context)
-        except ParseTemplateDoesNotExist, pte:
-            #SIMPLE
-            #DIE!  we reference something that dne
-            raise pte
         except:
             if settings.TEMPLATE_DEBUG:
                 raise
             return ''
 
+@register.tag('block')
 def do_block(parser, token):
     """
     Define a block that can be overridden by child templates.
@@ -199,10 +186,17 @@ def do_block(parser, token):
         parser.__loaded_blocks.append(block_name)
     except AttributeError: # parser.__loaded_blocks isn't a list yet
         parser.__loaded_blocks = [block_name]
-    nodelist = parser.parse(('endblock', 'endblock %s' % block_name))
-    parser.delete_first_token()
+    nodelist = parser.parse(('endblock',))
+
+    # This check is kept for backwards-compatibility. See #3100.
+    endblock = parser.next_token()
+    acceptable_endblocks = ('endblock', 'endblock %s' % block_name)
+    if endblock.contents not in acceptable_endblocks:
+        parser.invalid_block_tag(endblock, 'endblock', acceptable_endblocks)
+
     return BlockNode(block_name, nodelist)
 
+@register.tag('extends')
 def do_extends(parser, token):
     """
     Signal that this template extends a parent template.
@@ -216,16 +210,13 @@ def do_extends(parser, token):
     bits = token.split_contents()
     if len(bits) != 2:
         raise TemplateSyntaxError("'%s' takes one argument" % bits[0])
-    parent_name, parent_name_expr = None, None
-    if bits[1][0] in ('"', "'") and bits[1][-1] == bits[1][0]:
-        parent_name = bits[1][1:-1]
-    else:
-        parent_name_expr = parser.compile_filter(bits[1])
+    parent_name = parser.compile_filter(bits[1])
     nodelist = parser.parse()
     if nodelist.get_nodes_by_type(ExtendsNode):
         raise TemplateSyntaxError("'%s' cannot appear more than once in the same template" % bits[0])
-    return ExtendsNode(nodelist, parent_name, parent_name_expr)
+    return ExtendsNode(nodelist, parent_name)
 
+@register.tag('include')
 def do_include(parser, token):
     """
     Loads a template and renders it with the current context. You can pass
@@ -271,102 +262,3 @@ def do_include(parser, token):
                                    isolated_context=isolated_context)
     return IncludeNode(parser.compile_filter(bits[1]), extra_context=namemap,
                        isolated_context=isolated_context)
-
-#SIMPLE
-def do_simple_extends(parser, token):
-    """
-    Signal that this template extends a parent template.
-
-    This tag may be used in two ways: ``{% extends "base" %}`` (with quotes)
-    uses the literal value "base" as the name of the parent template to extend,
-    or ``{% extends variable %}`` uses the value of ``variable`` as either the
-    name of the parent template to extend (if it evaluates to a string) or as
-    the parent tempate itelf (if it evaluates to a Template object).
-    """
-    bits = token.split_contents()
-    if len(bits) != 2:
-        raise TemplateSyntaxError("'%s' takes one argument" % bits[0])
-    parent_name, parent_name_expr = None, None
-    render = False
-    if bits[1][0] in ('"', "'") and bits[1][-1] == bits[1][0]:
-        #SIMPLE
-        import re
-        extend = bits[1]
-        if re.search("{{([\s\w.|]*)}}", extend):
-            #do nothing so its cautght later... 
-            render = True
-            #END SIMPLE
-        else:
-            parent_name = bits[1][1:-1]
-    if parent_name ==None:
-        parent_name_expr = parser.compile_filter(bits[1])
-        
-    nodelist = parser.parse()
-    if nodelist.get_nodes_by_type(SimpleExtendsNode):
-        raise TemplateSyntaxError("'%s' cannot appear more than once in the same template" % bits[0])
-    return SimpleExtendsNode(nodelist, parent_name, parent_name_expr,render_parent=render)
-
-class SimpleExtendsNode(Node):
-    must_be_first = True
-
-    def __init__(self, nodelist, parent_name, parent_name_expr, template_dirs=None, render_parent=False):
-        self.nodelist = nodelist
-        self.render_parent = render_parent
-        self.parent_name, self.parent_name_expr = parent_name, parent_name_expr
-        self.template_dirs = template_dirs
-        self.blocks = dict([(n.name, n) for n in nodelist.get_nodes_by_type(BlockNode)])
-
-    def __repr__(self):
-        if self.parent_name_expr:
-            return "<ExtendsNode: extends %s>" % self.parent_name_expr.token
-        return '<ExtendsNode: extends "%s">' % self.parent_name
-
-    def get_parent(self, context):
-        if self.parent_name_expr:
-            self.parent_name = self.parent_name_expr.resolve(context)
-            if self.render_parent:
-                self.parent_name = Template(self.parent_name).render(context)
-                
-        parent = self.parent_name
-        if not parent:
-            error_msg = "Invalid template name in 'extends' tag: %r." % parent
-            if self.parent_name_expr:
-                error_msg += " Got this from the '%s' variable." % self.parent_name_expr.token
-            raise TemplateSyntaxError(error_msg)
-        if hasattr(parent, 'render'):
-            return parent # parent is a Template object
-        return get_template(parent)
-
-    def render(self, context):
-        compiled_parent = self.get_parent(context)
-        logging.info("compiled parent %s" % compiled_parent)
-        if BLOCK_CONTEXT_KEY not in context.render_context:
-            context.render_context[BLOCK_CONTEXT_KEY] = BlockContext()
-        block_context = context.render_context[BLOCK_CONTEXT_KEY]
-
-        # Add the block nodes from this node to the block context
-        block_context.add_blocks(self.blocks)
-
-        # If this block's parent doesn't have an extends node it is the root,
-        # and its block nodes also need to be added to the block context.
-        for node in compiled_parent.nodelist:
-            # The ExtendsNode has to be the first non-text node.
-            if not isinstance(node, TextNode):
-                if not isinstance(node, ExtendsNode):
-                    blocks = dict([(n.name, n) for n in
-                                   compiled_parent.nodelist.get_nodes_by_type(BlockNode)])
-                    block_context.add_blocks(blocks)
-                break
-
-        # Call Template._render explicitly so the parser context stays
-        # the same.
-        return compiled_parent._render(context)
-    
-register.tag('simple_extends', do_simple_extends)
-
-#END SIMPLE
-
-
-register.tag('block', do_block)
-register.tag('extends', do_extends)
-register.tag('include', do_include)

@@ -8,10 +8,7 @@ pretty-print::
     $ echo '{ 1.2:3.4}' | python -msimplejson.tool
     Expecting property name: line 1 column 2 (char 2)
 """
-try:
-    import json
-except ImportError:
-    from django.utils import simplejson as json
+from django.utils import simplejson
 
 def main():
     import sys
@@ -27,10 +24,10 @@ def main():
     else:
         raise SystemExit("%s [infile [outfile]]" % (sys.argv[0],))
     try:
-        obj = json.load(infile)
+        obj = simplejson.load(infile)
     except ValueError, e:
         raise SystemExit(e)
-    json.dump(obj, outfile, sort_keys=True, indent=4)
+    simplejson.dump(obj, outfile, sort_keys=True, indent=4)
     outfile.write('\n')
 
 

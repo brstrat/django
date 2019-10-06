@@ -3,10 +3,8 @@
 import re
 import sys
 import struct
-try:
-    from json.scanner import make_scanner
-except ImportError:
-    from django.utils.simplejson.scanner import make_scanner
+
+from django.utils.simplejson.scanner import make_scanner
 c_scanstring = None
 
 __all__ = ['JSONDecoder']

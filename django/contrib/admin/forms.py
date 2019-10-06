@@ -6,8 +6,8 @@ from django.contrib.auth.models import User
 
 from django.utils.translation import ugettext_lazy, ugettext as _
 
-ERROR_MESSAGE = ugettext_lazy("Please enter a correct username and password. "
-                              "Note that both fields are case-sensitive.")
+ERROR_MESSAGE = ugettext_lazy("Please enter the correct username and password "
+        "for a staff account. Note that both fields are case-sensitive.")
 
 class AdminAuthenticationForm(AuthenticationForm):
     """
@@ -28,8 +28,7 @@ class AdminAuthenticationForm(AuthenticationForm):
                 if u'@' in username:
                     # Mistakenly entered e-mail address instead of username? Look it up.
                     try:
-                        # DJANGO_SIMPLE
-                        user = User.get_unique(username)
+                        user = User.objects.get(email=username)
                     except (User.DoesNotExist, User.MultipleObjectsReturned):
                         # Nothing to do here, moving along.
                         pass
