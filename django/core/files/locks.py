@@ -19,6 +19,8 @@ __all__ = ('LOCK_EX','LOCK_SH','LOCK_NB','lock','unlock')
 
 system_type = None
 
+"""
+#removed to suppress errors due to GAE filesystem sandboxing
 try:
     import win32con
     import win32file
@@ -30,7 +32,7 @@ try:
     system_type = 'nt'
 except (ImportError, AttributeError):
     pass
-
+"""
 try:
     import fcntl
     LOCK_EX = fcntl.LOCK_EX

@@ -351,6 +351,9 @@ class BaseDatabaseFeatures(object):
     has_select_for_update = False
     has_select_for_update_nowait = False
 
+    distinguishes_insert_from_update = True
+    supports_deleting_related_objects = False
+    supports_joins = True
     supports_select_related = True
 
     # Does the default test database allow multiple connections?
@@ -788,6 +791,15 @@ class BaseDatabaseOperations(object):
     # Same as prep_for_like_query(), but called for "iexact" matches, which
     # need not necessarily be implemented using "LIKE" in the backend.
     prep_for_iexact_query = prep_for_like_query
+
+    def value_to_db_auto(self, value):
+        """
+        Transform an AutoField value to an object compatible with what is expected
+        by the backend driver for automatic keys.
+        """
+        if value is None:
+            return None
+        return int(value)
 
     def value_to_db_date(self, value):
         """

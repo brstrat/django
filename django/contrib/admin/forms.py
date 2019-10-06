@@ -28,7 +28,8 @@ class AdminAuthenticationForm(AuthenticationForm):
                 if u'@' in username:
                     # Mistakenly entered e-mail address instead of username? Look it up.
                     try:
-                        user = User.objects.get(email=username)
+                        # Needed to check for is_active
+                        user = User.get_unique(username)
                     except (User.DoesNotExist, User.MultipleObjectsReturned):
                         # Nothing to do here, moving along.
                         pass

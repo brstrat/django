@@ -172,6 +172,11 @@ def build_request_repr(request, path_override=None, GET_override=None,
     except:
         meta = '<could not parse>'
     path = path_override if path_override is not None else request.path
+
+    if not settings.ON_PRODUCTION_SERVER and not settings.LOG_REQUEST_OBJECT:
+        return '<WSGIRequest\nGET:%s,\nPOST:%s, ...Request elided settings.LOG_REQUEST_OBJECT=False...>' % \
+            (unicode(get), unicode(post))
+
     return smart_str(u'<%s\npath:%s,\nGET:%s,\nPOST:%s,\nCOOKIES:%s,\nMETA:%s>' %
                      (request.__class__.__name__,
                       path,
@@ -766,7 +771,11 @@ class HttpResponseNotFound(HttpResponse):
 
 class HttpResponseForbidden(HttpResponse):
     status_code = 403
-
+    
+class HTTPMethodNotSupported(Exception):
+    def __init__(self, http_response=None ):
+        self.http_response = http_response or  HttpResponseNotAllowed([])
+        
 class HttpResponseNotAllowed(HttpResponse):
     status_code = 405
 

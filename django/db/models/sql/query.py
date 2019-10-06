@@ -11,6 +11,7 @@ import copy
 
 from django.utils.datastructures import SortedDict
 from django.utils.encoding import force_unicode
+from django.utils.functional import memoize
 from django.utils.tree import Node
 from django.db import connections, DEFAULT_DB_ALIAS
 from django.db.models import signals
@@ -26,6 +27,10 @@ from django.db.models.sql.where import (WhereNode, Constraint, EverythingNode,
 from django.core.exceptions import FieldError
 
 __all__ = ['Query', 'RawQuery']
+
+
+_MAX_INT_32 = 2**31-1
+
 
 class RawQuery(object):
     """
@@ -375,7 +380,6 @@ class Query(object):
             self.remove_inherited_models()
 
         query.clear_ordering(True)
-        query.clear_limits()
         query.select_for_update = False
         query.select_related = False
         query.related_select_cols = []
@@ -428,17 +432,15 @@ class Query(object):
 
     def has_results(self, using):
         q = self.clone()
-        q.add_extra({'a': 1}, None, None, None, None, None)
         q.select = []
         q.select_fields = []
         q.default_cols = False
         q.select_related = False
-        q.set_extra_mask(('a',))
         q.set_aggregate_mask(())
         q.clear_ordering(True)
         q.set_limits(high=1)
         compiler = q.get_compiler(using=using)
-        return bool(compiler.execute_sql(SINGLE))
+        return compiler.has_results()
 
     def combine(self, rhs, connector):
         """
@@ -1617,7 +1619,7 @@ class Query(object):
 
         Typically, this means no limits or offsets have been put on the results.
         """
-        return not self.low_mark and self.high_mark is None
+        return not self.low_mark and (self.high_mark is None or self.high_mark == _MAX_INT_32)
 
     def clear_select_fields(self):
         """
@@ -1950,6 +1952,65 @@ class Query(object):
             select_col = join_info[RHS_JOIN_COL]
         self.select = [(select_alias, select_col)]
         self.remove_inherited_models()
+
+    def pk_only_filters(self):
+        """ Returns a tuple of
+
+            (is_pk_query, pk_query_filters, additional_filters)
+
+        where `is_pk_query` is a True if this query filters on a pk field, and
+
+        `pk_query_filters` is a dictionary of filters that can be applied to filter
+        entities in memory.  Only a subset of filters are considered for `pk_query_filters`,
+        others fall back to slower SQL based filtering, and
+
+        `additional_filters` is a boolean if there are other filters to consider
+
+        Example::
+
+            Model.objects.filter(pk=123)
+                -> True, {'is_active': True, 'polyclass': 'Model'}, False
+
+            Model.objects.filter(name='abc')
+                -> False, {'is_active': True, 'polyclass': 'Model'}, True
+
+            Model.objects(active_only=False).filter(pk__in=[...])
+                -> True, {'polyclass': 'Model'}, False
+
+            Model.objects.filter(pk=123, name='abc')
+                -> True, {'is_active': True, 'polyclass': 'Model'}, True
+
+        """
+        def _pk_only_filters():
+            is_pk_query = False
+            pk_query_filters = {}
+            additional_filters = False
+
+            for where in self.where.children:
+                field = where.children[0][0].field
+                if where.negated:
+                    return False, None, True
+                if field.primary_key:
+                    is_pk_query = True
+                    continue
+                if field.name in self._pk_only_allowed_filters:
+                    pk_query_filters[field.name] = where.children[0][3]
+                else:
+                    additional_filters = True
+            if not is_pk_query:
+                pk_query_filters = None
+            return is_pk_query, pk_query_filters, additional_filters
+
+        if self._pk_only_filters is None:
+            try:
+                self._pk_only_filters = _pk_only_filters()
+            except:
+                self._pk_only_filters = False, None, True
+        return self._pk_only_filters
+
+    _pk_only_filters = None
+
+    _pk_only_allowed_filters = frozenset({'is_active', 'polyclass'})
 
 
 def get_order_dir(field, default='ASC'):

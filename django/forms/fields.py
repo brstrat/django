@@ -30,6 +30,9 @@ from django.utils.translation import ugettext_lazy as _
 # Provide this import for backwards compatibility.
 from django.core.validators import EMPTY_VALUES
 
+import time
+from django.forms.widgets import DisplayOnly, SimpleSelect
+from dateutil.parser import parse as dateparse
 
 __all__ = (
     'Field', 'CharField', 'IntegerField',
@@ -38,7 +41,9 @@ __all__ = (
     'BooleanField', 'NullBooleanField', 'ChoiceField', 'MultipleChoiceField',
     'ComboField', 'MultiValueField', 'FloatField', 'DecimalField',
     'SplitDateTimeField', 'IPAddressField', 'GenericIPAddressField', 'FilePathField',
-    'SlugField', 'TypedChoiceField', 'TypedMultipleChoiceField'
+    'SlugField', 'TypedChoiceField', 'TypedMultipleChoiceField',
+
+    'DisplayOnlyField',
 )
 
 
@@ -56,7 +61,9 @@ class Field(object):
 
     def __init__(self, required=True, widget=None, label=None, initial=None,
                  help_text=None, error_messages=None, show_hidden_initial=False,
-                 validators=[], localize=False):
+                 validators=[], localize=False, watermark=None,
+
+                 editable=True, filters=None, hint=None, mark_required=False):
         # required -- Boolean that specifies whether the field is required.
         #             True by default.
         # widget -- A Widget class, or instance of a Widget class, that should
@@ -76,8 +83,19 @@ class Field(object):
         #                        hidden widget with initial value after widget.
         # validators -- List of addtional validators to use
         # localize -- Boolean that specifies if the field should be localized.
+        # watermark -- Use placeholder instead of label
         if label is not None:
             label = smart_unicode(label)
+
+        self.hint = hint
+        self.editable = editable
+        if not editable:
+            copy_attrs = {}
+            if widget and widget.attrs:
+                copy_attrs = widget.attrs
+            widget = DisplayOnly(attrs=copy_attrs)
+            required = False
+
         self.required, self.label, self.initial = required, label, initial
         self.show_hidden_initial = show_hidden_initial
         if help_text is None:
@@ -88,6 +106,9 @@ class Field(object):
         if isinstance(widget, type):
             widget = widget()
 
+        self.filters = widget.filters = filters
+        self.mark_required = widget.mark_required = mark_required
+
         # Trigger the localization machinery if needed.
         self.localize = localize
         if self.localize:
@@ -97,11 +118,29 @@ class Field(object):
         widget.is_required = self.required
 
         # Hook into self.widget_attrs() for any Field-specific HTML attributes.
-        extra_attrs = self.widget_attrs(widget)
+        extra_attrs = self.widget_attrs(widget) or {}
+
         if extra_attrs:
             widget.attrs.update(extra_attrs)
 
+
+        if watermark:
+            #only override it if its not there
+            if not 'placeholder' in widget.attrs:
+                cls = ' watermark'
+                #if we want to use modernizer go for it...widget.attrs.update({'placeholder':  self.label})
+                new_attrs = {'class': widget.attrs.get('class', '') + cls}
+                if 'title' not in widget.attrs:
+                    new_attrs['title'] = self.label
+                widget.attrs.update(new_attrs)
+            self.label = None
+            self.watermark = watermark
+
         self.widget = widget
+
+        #Adds :required class to any required field
+        if self.required or 'required' in self.widget.attrs:
+            self.set_required(True)
 
         # Increase the creation counter, and save our local copy.
         self.creation_counter = Field.creation_counter
@@ -114,6 +153,44 @@ class Field(object):
         self.error_messages = messages
 
         self.validators = self.default_validators + validators
+
+    def set_required(self, required=True, message=None):
+        """ Marks the field as required.  This
+
+            1) adds a red * to the label
+            2) causes client side required validation
+            3) causes server side required validation
+        """
+        self.required = required
+        if self.widget:
+            self.widget.is_required = required
+        self.set_inline_required(required)
+        if message is not None:
+            self.error_messages['required'] = message
+
+    def set_required_star(self, required=True):
+        """ Adds a red star to the label, but does not require the field """
+        if self.widget:
+            self.widget.attrs['class'] = self.widget.attrs.get('class', '')
+            self.widget.attrs['class'].replace('required-star', '')
+            if required:
+                self.widget.attrs['class'] = self.widget.attrs['class'] + ' required-star'
+
+    def set_inline_required(self, required=True):
+        """ Enables or disables client-side validation.  This does not remove the red * """
+        if self.widget:
+            widget_class = self.widget.attrs.get('class', '')
+            widget_class = widget_class.replace(':required', '')
+            if required:
+                widget_class += ' :required'
+            try:
+                self.widget.attrs.update({'class': widget_class})
+            except:
+                pass
+
+    def hide(self):
+        # Start this field/li as hidden
+        self.widget.attrs['class'] = self.widget.attrs.get('class', '') + ' start-hidden'
 
     def prepare_value(self, value):
         return value
@@ -143,7 +220,7 @@ class Field(object):
         if errors:
             raise ValidationError(errors)
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         """
         Validates the given value and returns its "cleaned" value as an
         appropriate Python object.
@@ -365,6 +442,12 @@ class DateField(BaseTemporalField):
         'invalid': _(u'Enter a valid date.'),
     }
 
+    def __init__(self, default_date=None, *args, **kwargs):
+        super(DateField, self).__init__(*args, **kwargs)
+
+        # Set defaults for m/d/y if not provided
+        self.default_date = default_date
+
     def to_python(self, value):
         """
         Validates that the input can be converted to a date. Returns a Python
@@ -376,7 +459,22 @@ class DateField(BaseTemporalField):
             return value.date()
         if isinstance(value, datetime.date):
             return value
-        return super(DateField, self).to_python(value)
+        # Dateutil parse function for smarter date string parsing
+        try:
+            parsed_date = dateparse(value, default=self.default_date)
+            if parsed_date:
+                try:
+                    return parsed_date.date()
+                except AttributeError:
+                    return parsed_date
+        except:
+            #Fall back to django implementation
+            for format in self.input_formats or formats.get_format('DATE_INPUT_FORMATS'):
+                try:
+                    return datetime.date(*time.strptime(value, format)[:3])
+                except ValueError:
+                    continue
+        raise ValidationError(self.error_messages['invalid'])
 
     def strptime(self, value, format):
         return datetime.datetime.strptime(value, format).date()
@@ -434,8 +532,18 @@ class DateTimeField(BaseTemporalField):
             if value[0] in validators.EMPTY_VALUES and value[1] in validators.EMPTY_VALUES:
                 return None
             value = '%s %s' % tuple(value)
-        result = super(DateTimeField, self).to_python(value)
-        return from_current_timezone(result)
+
+        # Dateutil parse function for smarter parsing
+        try:
+            return dateparse(value)
+        except:
+            # Fall back to django implementation
+            for format in self.input_formats or formats.get_format('DATETIME_INPUT_FORMATS'):
+                try:
+                    return datetime.datetime(*time.strptime(value, format)[:6])
+                except ValueError:
+                    continue
+        raise ValidationError(self.error_messages['invalid'])
 
     def strptime(self, value, format):
         return datetime.datetime.strptime(value, format)
@@ -475,7 +583,7 @@ class EmailField(CharField):
     }
     default_validators = [validators.validate_email]
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         value = self.to_python(value).strip()
         return super(EmailField, self).clean(value)
 
@@ -515,7 +623,7 @@ class FileField(Field):
 
         return data
 
-    def clean(self, data, initial=None):
+    def clean(self, data, initial=None, *args, **kwargs):
         # If the widget got contradictory inputs, we raise a validation error
         if data is FILE_INPUT_CONTRADICTION:
             raise ValidationError(self.error_messages['contradiction'])
@@ -674,7 +782,7 @@ class NullBooleanField(BooleanField):
         pass
 
 class ChoiceField(Field):
-    widget = Select
+    widget = SimpleSelect
     default_error_messages = {
         'invalid_choice': _(u'Select a valid choice. %(value)s is not one of the available choices.'),
     }
@@ -817,7 +925,7 @@ class ComboField(Field):
             f.required = False
         self.fields = fields
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         """
         Validates the given value against all of self.fields, which is a
         list of Field instances.
@@ -860,7 +968,7 @@ class MultiValueField(Field):
     def validate(self, value):
         pass
 
-    def clean(self, value):
+    def clean(self, value, *args, **kwargs):
         """
         Validates every value in the given list. A value is validated against
         the corresponding Field in self.fields.
@@ -1014,3 +1122,15 @@ class SlugField(CharField):
                      u" underscores or hyphens."),
     }
     default_validators = [validators.validate_slug]
+
+
+class DisplayOnlyField(Field):
+    widget = DisplayOnly
+
+    def __init__(self, max_length=None, min_length=None, *args, **kwargs):
+        kwargs['editable'] = False
+        kwargs['required'] = False
+        super(DisplayOnlyField, self).__init__(*args, **kwargs)
+
+    def to_python(self, value):
+        return self.widget.static_value

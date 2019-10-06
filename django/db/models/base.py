@@ -14,7 +14,7 @@ from django.db.models.fields.related import (ManyToOneRel,
 from django.db import (connections, router, transaction, DatabaseError,
     DEFAULT_DB_ALIAS)
 from django.db.models.query import Q
-from django.db.models.query_utils import DeferredAttribute
+from django.db.models.query_utils import DeferredAttribute, LazyAttribute
 from django.db.models.deletion import Collector
 from django.db.models.options import Options
 from django.db.models import signals
@@ -47,6 +47,31 @@ class ModelBase(type):
             meta = attr_meta
         base_meta = getattr(new_class, '_meta', None)
 
+        poly = getattr(base_meta, 'poly', None)
+        if poly:
+            setattr(meta, 'poly', poly)
+
+        if meta:
+            cascade_delete = {}
+            for base in bases:
+                try:
+                    cascade_delete.update(base._meta.cascade_delete)
+                except:
+                    pass
+            if hasattr(attr_meta, 'cascade_delete'):
+                cascade_delete.update(attr_meta.cascade_delete)
+            setattr(meta, 'cascade_delete', cascade_delete)
+
+            layout_whitelist = set()
+            for base in bases:
+                try:
+                    layout_whitelist.update(base._meta.layout_whitelist)
+                except:
+                    pass
+            if hasattr(attr_meta, 'layout_whitelist'):
+                layout_whitelist.update(attr_meta.layout_whitelist)
+            setattr(meta, 'layout_whitelist', layout_whitelist)
+
         if getattr(meta, 'app_label', None) is None:
             # Figure out the app_label by looking one level up.
             # For 'django.contrib.sites.models', this would be 'sites'.
@@ -56,6 +81,12 @@ class ModelBase(type):
             kwargs = {}
 
         new_class.add_to_class('_meta', Options(meta, **kwargs))
+        
+        #Adds 'DoesNotExist' exception to abstract poly classes
+        if poly and abstract:
+            new_class.add_to_class('DoesNotExist', subclass_exception('DoesNotExist',
+                    (ObjectDoesNotExist, object), module))
+            
         if not abstract:
             new_class.add_to_class('DoesNotExist', subclass_exception('DoesNotExist',
                     tuple(x.DoesNotExist
@@ -92,6 +123,7 @@ class ModelBase(type):
         m = get_model(new_class._meta.app_label, name,
                       seed_cache=False, only_installed=False)
         if m is not None:
+            m._meta._initial_load = False
             return m
 
         # Add all attributes to the class.
@@ -139,16 +171,8 @@ class ModelBase(type):
                 continue
 
             parent_fields = base._meta.local_fields + base._meta.local_many_to_many
-            # Check for clashes between locally declared fields and those
-            # on the base classes (we cannot handle shadowed fields at the
-            # moment).
-            for field in parent_fields:
-                if field.name in field_names:
-                    raise FieldError('Local field %r in class %r clashes '
-                                     'with field of similar name from '
-                                     'base class %r' %
-                                        (field.name, name, base.__name__))
-            if not base._meta.abstract:
+
+            if not base._meta.abstract and (not poly or is_proxy):
                 # Concrete classes...
                 base = base._meta.concrete_model
                 if base in o2o_map:
@@ -186,12 +210,15 @@ class ModelBase(type):
                                      'abstract base class %r' % \
                                         (field.name, name, base.__name__))
                 new_class.add_to_class(field.name, copy.deepcopy(field))
-
-        if abstract:
+        
+        #Poly is abstract yet instantiable (for querying purposes)
+        if abstract and not poly:
             # Abstract base models can't be instantiated and don't appear in
             # the list of models for an app. We do the final setup for them a
             # little differently from normal models.
             attr_meta.abstract = False
+            #Reset verbose_name so we can calculate our own
+            attr_meta.verbose_name = None
             new_class.Meta = attr_meta
             return new_class
 
@@ -264,61 +291,96 @@ class ModelState(object):
     """
     A class for storing instance state
     """
-    def __init__(self, db=None):
+    def __init__(self, db=None, entity=None):
         self.db = db
         # If true, uniqueness validation checks will consider this a new, as-yet-unsaved object.
         # Necessary for correct validation of new instances of objects with explicit (non-auto) PKs.
-        # This impacts validation only; it has no effect on the actual save.
+        # Also used when connection.features.distinguishes_insert_from_update is false to identify
+        # when an instance has been newly created.
         self.adding = True
+        self.search_doc = None
+        self.entity = entity
 
 class Model(object):
     __metaclass__ = ModelBase
     _deferred = False
 
     def __init__(self, *args, **kwargs):
+        _state_kwargs = kwargs.pop('_state_kwargs', None) or {}
+
         signals.pre_init.send(sender=self.__class__, args=args, kwargs=kwargs)
 
         # Set up the storage for instance state
-        self._state = ModelState()
+        self._state = ModelState(**_state_kwargs)
 
         # There is a rather weird disparity here; if kwargs, it's set, then args
         # overrides it. It should be one or the other; don't duplicate the work
         # The reason for the kwargs check is that standard iterator passes in by
         # args, and instantiation for iteration is 33% faster.
-        args_len = len(args)
-        if args_len > len(self._meta.fields):
-            # Daft, but matches old exception sans the err msg.
-            raise IndexError("Number of args exceeds number of fields")
 
-        fields_iter = iter(self._meta.fields)
-        if not kwargs:
-            # The ordering of the izip calls matter - izip throws StopIteration
-            # when an iter throws it. So if the first iter throws it, the second
-            # is *not* consumed. We rely on this, so don't change the order
-            # without changing the logic.
-            for val, field in izip(args, fields_iter):
-                setattr(self, field.attname, val)
+        # polymodel can have more fields passed in than exist on the leaf model
+        if not getattr(self._meta, 'poly', False):
+            args_len = len(args)
+            if args_len > len(self._meta.fields):
+
+                # Daft, but matches old exception sans the err msg.
+                raise IndexError("Number of args exceeds number of fields")
+
+        # polymodel must be set differently, due to having more db columns than exist in the leaf model
+        if getattr(self._meta, 'poly', False):
+            fields_iter = iter(self._meta.poly_fields)
+            _local_field_names = {f.name for f in self._meta.fields}
+            if not kwargs:
+                for val, field in izip(args, fields_iter):
+                    if field.name in _local_field_names:
+                        setattr(self, field.attname, val if val is not None else field.get_default())
+            else:
+                for val, field in izip(args, fields_iter):
+                    if field.name in _local_field_names:
+                        setattr(self, field.attname, val if val is not None else field.get_default())
+                    kwargs.pop(field.name, None)
+                    if isinstance(field.rel, ManyToOneRel):
+                        kwargs.pop(field.attname, None)
         else:
-            # Slower, kwargs-ready version.
-            for val, field in izip(args, fields_iter):
-                setattr(self, field.attname, val)
-                kwargs.pop(field.name, None)
-                # Maintain compatibility with existing calls.
-                if isinstance(field.rel, ManyToOneRel):
-                    kwargs.pop(field.attname, None)
+            fields_iter = iter(self._meta.fields)
+            if not kwargs:
+                # The ordering of the izip calls matter - izip throws StopIteration
+                # when an iter throws it. So if the first iter throws it, the second
+                # is *not* consumed. We rely on this, so don't change the order
+                # without changing the logic.
+                for val, field in izip(args, fields_iter):
+                    setattr(self, field.attname, val if val is not None else field.get_default())
+            else:
+                # Slower, kwargs-ready version.
+                for val, field in izip(args, fields_iter):
+                    setattr(self, field.attname, val if val is not None else field.get_default())
+                    kwargs.pop(field.name, None)
+                    # Maintain compatibility with existing calls.
+                    if isinstance(field.rel, ManyToOneRel):
+                        kwargs.pop(field.attname, None)
 
         # Now we're left with the unprocessed fields that *must* come from
         # keywords, or default.
 
         for field in fields_iter:
+            if getattr(self._meta, 'poly', False) and field.name not in _local_field_names:
+                continue
             is_related_object = False
             # This slightly odd construct is so that we can access any
             # data-descriptor object (DeferredAttribute) without triggering its
             # __get__ method.
-            if (field.attname not in kwargs and
-                    isinstance(self.__class__.__dict__.get(field.attname), DeferredAttribute)):
-                # This field will be populated on request.
-                continue
+
+            if field.attname not in kwargs:
+                field_desc = self.__class__.__dict__.get(field.attname)
+                if field_desc:
+                    if isinstance(field_desc, LazyAttribute):
+                        if self._state.entity is not None:
+                            # This field will be populated on request.
+                            continue
+                    elif isinstance(field_desc, DeferredAttribute):
+                        # This field will be populated on request.
+                        continue
+
             if kwargs:
                 if isinstance(field.rel, ManyToOneRel):
                     try:
@@ -365,6 +427,7 @@ class Model(object):
                     pass
             if kwargs:
                 raise TypeError("'%s' is an invalid keyword argument for this function" % kwargs.keys()[0])
+        self._original_pk = self.pk if self._meta.pk is not None else None
         super(Model, self).__init__()
         signals.post_init.send(sender=self.__class__, instance=self)
 
@@ -396,6 +459,9 @@ class Model(object):
         need to do things manually, as they're dynamically created classes and
         only module-level classes can be pickled by the default path.
         """
+        if not self._deferred:
+            return super(Model, self).__reduce__()
+
         data = self.__dict__
         model = self.__class__
         # The obvious thing to do here is to invoke super().__reduce__()
@@ -473,6 +539,7 @@ class Model(object):
         ('raw', 'cls', and 'origin').
         """
         using = using or router.db_for_write(self.__class__, instance=self)
+        entity_exists = bool(not self._state.adding and self._original_pk == self.pk)
         assert not (force_insert and force_update)
         if cls is None:
             cls = self.__class__
@@ -518,7 +585,21 @@ class Model(object):
             pk_set = pk_val is not None
             record_exists = True
             manager = cls._base_manager
-            if pk_set:
+            connection = connections[using]
+
+            # TODO/NONREL: Some backends could emulate force_insert/_update
+            # with an optimistic transaction, but since it's costly we should
+            # only do it when the user explicitly wants it.
+            # By adding support for an optimistic locking transaction
+            # in Django (SQL: SELECT ... FOR UPDATE) we could even make that
+            # part fully reusable on all backends (the current .exists()
+            # check below isn't really safe if you have lots of concurrent
+            # requests. BTW, and neither is QuerySet.get_or_create).
+            try_update = connection.features.distinguishes_insert_from_update
+            if not try_update:
+                record_exists = False
+
+            if try_update and pk_set:
                 # Determine whether a record with the primary key already exists.
                 if (force_update or (not force_insert and
                         manager.using(using).filter(pk=pk_val).exists())):
@@ -559,10 +640,16 @@ class Model(object):
         # Once saved, this is no longer a to-be-added instance.
         self._state.adding = False
 
+        self._original_pk = self.pk
+
         # Signal that the save is complete
         if origin and not meta.auto_created:
+            if connection.features.distinguishes_insert_from_update:
+                created = not record_exists
+            else:
+                created = not entity_exists
             signals.post_save.send(sender=origin, instance=self,
-                created=(not record_exists), raw=raw, using=using)
+                created=created, raw=raw, using=using)
 
 
     save_base.alters_data = True
@@ -575,11 +662,28 @@ class Model(object):
         collector.collect([self])
         collector.delete()
 
+        self._state.adding = False
+        self._original_pk = None
+
     delete.alters_data = True
 
     def _get_FIELD_display(self, field):
-        value = getattr(self, field.attname)
-        return force_unicode(dict(field.flatchoices).get(value, value), strings_only=True)
+        if getattr(field, 'item_field', None) and getattr(field.item_field, 'flatchoices'):
+            choices = dict(field.item_field.flatchoices)
+            def _display():
+                for value in getattr(self, field.attname):
+                    yield force_unicode(choices.get(value, value), strings_only=True)
+            return list(_display())
+        else:
+            value = getattr(self, field.attname)
+            return force_unicode(dict(field.flatchoices).get(value, value), strings_only=True)
+
+    def _get_ITERABLE_FIELD_display(self, field):
+        value_list = getattr(self, field.attname) or []
+        if not hasattr(field, 'item_field'):
+            return value_list
+        choice_dict = dict(field.item_field.choices)
+        return [choice_dict.get(value, value) for value in value_list]
 
     def _get_next_or_previous_by_FIELD(self, field, is_next, **kwargs):
         if not self.pk:
@@ -653,7 +757,14 @@ class Model(object):
         unique_checks = []
 
         unique_togethers = [(self.__class__, self._meta.unique_together)]
-        for parent_class in self._meta.parents.keys():
+
+        if self._meta.poly:
+            # Inherit unique checks from parents for PolyModel
+            parents = self.__class_hierarchy__
+        else:
+            parents = self._meta.parents.keys()
+
+        for parent_class in parents:
             if parent_class._meta.unique_together:
                 unique_togethers.append((parent_class, parent_class._meta.unique_together))
 
@@ -664,7 +775,11 @@ class Model(object):
                     if name in exclude:
                         break
                 else:
-                    unique_checks.append((model_class, tuple(check)))
+                    if not isinstance(check, tuple):
+                        check = tuple(check)
+                    unique_check = (model_class, check)
+                    if unique_check not in unique_checks:
+                        unique_checks.append(unique_check)
 
         # These are checks for the unique_for_<date/year/month>.
         date_checks = []
@@ -726,7 +841,7 @@ class Model(object):
                     key = unique_check[0]
                 else:
                     key = NON_FIELD_ERRORS
-                errors.setdefault(key, []).append(self.unique_error_message(model_class, unique_check))
+                errors.setdefault(key, []).append(self.unique_error_message(self.__class__, unique_check))
 
         return errors
 

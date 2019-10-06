@@ -106,8 +106,8 @@ class Settings(BaseSettings):
                     setting_value = (setting_value,) # In case the user forgot the comma.
                 setattr(self, setting, setting_value)
 
-        if not self.SECRET_KEY:
-            warnings.warn("The SECRET_KEY setting must not be empty.", DeprecationWarning)
+        #if not self.SECRET_KEY:
+        #    warnings.warn("The SECRET_KEY setting must not be empty.", DeprecationWarning)
 
         if hasattr(time, 'tzset') and self.TIME_ZONE:
             # When we can, attempt to validate the timezone. If we can't find

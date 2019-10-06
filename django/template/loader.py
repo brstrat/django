@@ -26,11 +26,14 @@
 # installed, because pkg_resources is necessary to read eggs.
 
 from django.core.exceptions import ImproperlyConfigured
-from django.template.base import Origin, Template, Context, TemplateDoesNotExist, add_to_builtins
+from django.template.base import Origin, Template, Context, TemplateDoesNotExist, add_to_builtins,\
+    ParseTemplateDoesNotExist
 from django.utils.importlib import import_module
 from django.conf import settings
-
+import logging
 template_source_loaders = None
+
+from itertools import chain
 
 class BaseLoader(object):
     is_usable = False
@@ -53,6 +56,9 @@ class BaseLoader(object):
             # This allows for correct identification (later) of the actual template that does
             # not exist.
             return source, display_name
+        except ParseTemplateDoesNotExist:
+            raise
+            
 
     def load_template_source(self, template_name, template_dirs=None):
         """
@@ -131,6 +137,8 @@ def find_template(name, dirs=None):
         template_source_loaders = tuple(loaders)
     for loader in template_source_loaders:
         try:
+            if settings.LOG_TEMPLATE_RESOLUTION:
+                logging.debug('=Searching template %s' % name)
             source, display_name = loader(name, dirs)
             return (source, make_origin(display_name, loader, name, dirs))
         except TemplateDoesNotExist:
@@ -163,10 +171,17 @@ def render_to_string(template_name, dictionary=None, context_instance=None):
     the templates in the list. Returns a string.
     """
     dictionary = dictionary or {}
-    if isinstance(template_name, (list, tuple)):
+    # Iterate over chain also
+    if isinstance(template_name, (list, tuple, chain)):
         t = select_template(template_name)
     else:
         t = get_template(template_name)
+
+    try:
+        logging.info('=Loading template %s' % t.name)
+    except:
+        pass
+    
     if not context_instance:
         return t.render(Context(dictionary))
     # Add the dictionary to the context stack, ensuring it gets removed again

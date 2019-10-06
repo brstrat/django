@@ -324,7 +324,7 @@ class BaseFormSet(StrAndUnicode):
             form.fields[DELETION_FIELD_NAME] = BooleanField(label=_(u'Delete'), required=False)
 
     def add_prefix(self, index):
-        return '%s-%s' % (self.prefix, index)
+        return '%s__%s' % (self.prefix, index)
 
     def is_multipart(self):
         """

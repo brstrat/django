@@ -25,6 +25,8 @@ class SessionMiddleware(object):
             if accessed:
                 patch_vary_headers(response, ('Cookie',))
             if modified or settings.SESSION_SAVE_EVERY_REQUEST:
+                if getattr(request.session, 'skip_session_save', False):
+                    return response
                 if request.session.get_expire_at_browser_close():
                     max_age = None
                     expires = None

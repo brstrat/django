@@ -7,6 +7,7 @@ from django.core.files.base import File
 from django.core.files.storage import default_storage
 from django.core.files.images import ImageFile
 from django.db.models import signals
+from django.db.models.query_utils import LazyAttribute
 from django.utils.encoding import force_unicode, smart_str
 from django.utils.translation import ugettext_lazy as _
 
@@ -133,7 +134,7 @@ class FieldFile(File):
         # be restored later, by FileDescriptor below.
         return {'name': self.name, 'closed': False, '_committed': True, '_file': None}
 
-class FileDescriptor(object):
+class FileDescriptor(LazyAttribute):
     """
     The descriptor for the file attribute on the model instance. Returns a
     FieldFile when accessed so you can do stuff like::
@@ -145,11 +146,9 @@ class FileDescriptor(object):
         >>> instance.file = File(...)
 
     """
-    def __init__(self, field):
-        self.field = field
-
     def __get__(self, instance=None, owner=None):
         if instance is None:
+            return None
             raise AttributeError(
                 "The '%s' attribute can only be accessed from %s instances."
                 % (self.field.name, owner.__name__))
@@ -166,7 +165,7 @@ class FileDescriptor(object):
 
         # The instance dict contains whatever was originally assigned
         # in __set__.
-        file = instance.__dict__[self.field.name]
+        file = super(FileDescriptor, self).__get__(instance, owner)
 
         # If this value is a string (instance.file = "path/to/file") or None
         # then we simply wrap it with the appropriate attribute class according
@@ -251,7 +250,7 @@ class FileField(Field):
 
     def contribute_to_class(self, cls, name):
         super(FileField, self).contribute_to_class(cls, name)
-        setattr(cls, self.name, self.descriptor_class(self))
+        setattr(cls, self.name, self.descriptor_class(self, cls))
 
     def get_directory_name(self):
         return os.path.normpath(force_unicode(datetime.datetime.now().strftime(smart_str(self.upload_to))))
@@ -292,7 +291,7 @@ class ImageFileDescriptor(FileDescriptor):
     assigning the width/height to the width_field/height_field, if appropriate.
     """
     def __set__(self, instance, value):
-        previous_file = instance.__dict__.get(self.field.name)
+        previous_file = self.__get__(instance)
         super(ImageFileDescriptor, self).__set__(instance, value)
 
         # To prevent recalculating image dimensions when we are instantiating

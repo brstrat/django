@@ -1,3 +1,4 @@
+import logging
 from operator import attrgetter
 
 from django.db import connection, router
@@ -19,6 +20,15 @@ from django import forms
 RECURSIVE_RELATIONSHIP_CONSTANT = 'self'
 
 pending_lookups = {}
+
+
+class MemoizedForeignKeyModel(object):
+    """ Mixin for SimpleModel classes to indicate that FK references
+    to this model should be cached into local/remote memcache, and likewise cleared when
+    this model is saved
+    """
+    pass
+
 
 def add_lazy_relation(cls, field, relation, operation):
     """
@@ -270,9 +280,9 @@ class SingleRelatedObjectDescriptor(object):
             raise ValueError('Cannot assign None: "%s.%s" does not allow null values.' %
                                 (instance._meta.object_name, self.related.get_accessor_name()))
         elif value is not None and not isinstance(value, self.related.model):
-            raise ValueError('Cannot assign "%r": "%s.%s" must be a "%s" instance.' %
+            raise ValueError('Cannot assign "%r": "%s.%s" must be a "%s" instance, not a "%s".' %
                                 (value, instance._meta.object_name,
-                                 self.related.get_accessor_name(), self.related.opts.object_name))
+                                 self.related.get_accessor_name(), self.related.opts.object_name, value.__class__.__name__))
         elif value is not None:
             if instance._state.db is None:
                 instance._state.db = router.db_for_write(instance.__class__, instance=value)
@@ -346,8 +356,31 @@ class ReverseSingleRelatedObjectDescriptor(object):
                 params = {'%s__pk' % self.field.rel.field_name: val}
             else:
                 params = {'%s__exact' % self.field.rel.field_name: val}
-            qs = self.get_query_set(instance=instance)
-            rel_obj = qs.get(**params)
+
+            if hasattr(self.field.rel.to, '_get_memoized'):
+                if other_field.rel:
+                    rel_obj = self.field.rel.to._get_memoized(**params)
+                else:
+                    rel_obj = self.field.rel.to._get_memoized(val)
+            else:
+                qs = self.get_query_set(instance=instance)
+                rel_obj = qs.get(**params)
+
+            #If polymodel, change class to true poly child class
+            #Note This only gets us access to child class methods and metadata.
+            #     This does not retrieve any values from the db from the child
+            #     model level.  Need to find a way to retrieve all values from
+            #     a db row, and instantiate the correct class by evaluating the
+            #     polyclass attribute
+            if rel_obj and getattr(rel_obj._meta, 'poly', False):
+                try:
+                    true_class_name = rel_obj.polyclass[-1] 
+                    if true_class_name != rel_obj.__class__.__name__:
+                        true_class = get_model(rel_obj._meta.app_label, true_class_name, False)
+                        rel_obj.__class__ =  true_class
+                except:
+                    pass
+                
             setattr(instance, self.cache_name, rel_obj)
             return rel_obj
 
@@ -361,9 +394,9 @@ class ReverseSingleRelatedObjectDescriptor(object):
             raise ValueError('Cannot assign None: "%s.%s" does not allow null values.' %
                                 (instance._meta.object_name, self.field.name))
         elif value is not None and not isinstance(value, self.field.rel.to):
-            raise ValueError('Cannot assign "%r": "%s.%s" must be a "%s" instance.' %
+            raise ValueError('Cannot assign "%r": "%s.%s" must be a "%s" instance, not a "%s".' %
                                 (value, instance._meta.object_name,
-                                 self.field.name, self.field.rel.to._meta.object_name))
+                                 self.field.name, self.field.rel.to._meta.object_name, value.__class__.__name__))
         elif value is not None:
             if instance._state.db is None:
                 instance._state.db = router.db_for_write(instance.__class__, instance=value)
@@ -887,7 +920,11 @@ class ManyToOneRel(object):
         Returns the Field in the 'to' object to which this relationship is
         tied.
         """
-        data = self.to._meta.get_field_by_name(self.field_name)
+        try:
+            data = self.to._meta.get_field_by_name(self.field_name)
+        except AttributeError:
+            logging.debug('Error loading rel.to: %s = %s' % (self.field_name, self.to))
+            raise
         if not data[2]:
             raise FieldDoesNotExist("No related field named '%s'" %
                     self.field_name)
@@ -938,7 +975,8 @@ class ForeignKey(RelatedField, Field):
         except AttributeError: # to._meta doesn't exist, so it must be RECURSIVE_RELATIONSHIP_CONSTANT
             assert isinstance(to, basestring), "%s(%r) is invalid. First parameter to ForeignKey must be either a model, a model name, or the string %r" % (self.__class__.__name__, to, RECURSIVE_RELATIONSHIP_CONSTANT)
         else:
-            assert not to._meta.abstract, "%s cannot define a relation with abstract class %s" % (self.__class__.__name__, to._meta.object_name)
+            #Poly is abstract, yet can have relations
+            assert not (to._meta.abstract and not to._meta.poly), "%s cannot define a relation with abstract class %s" % (self.__class__.__name__, to._meta.object_name)
             # For backwards compatibility purposes, we need to *try* and set
             # the to_field during FK construction. It won't be guaranteed to
             # be correct until contribute_to_class is called. Refs #12190.
@@ -964,7 +1002,14 @@ class ForeignKey(RelatedField, Field):
             return
 
         using = router.db_for_read(model_instance.__class__, instance=model_instance)
-        qs = self.rel.to._default_manager.using(using).filter(
+        
+        try:
+            from app.util.common.auth import Sudo
+            queryset = self.rel.to.objects(auth_profile=Sudo(), active_only=False)
+        except:
+            queryset = self.rel.to._default_manager.using(using)
+        
+        qs = queryset.filter(
                 **{self.rel.field_name: value}
              )
         qs = qs.complex_filter(self.rel.limit_choices_to)
@@ -981,8 +1026,12 @@ class ForeignKey(RelatedField, Field):
     def get_default(self):
         "Here we check if the default value is an object and return the to_field if so."
         field_default = super(ForeignKey, self).get_default()
-        if isinstance(field_default, self.rel.to):
-            return getattr(field_default, self.rel.get_related_field().attname)
+        try:
+            if isinstance(field_default, self.rel.to):
+                return getattr(field_default, self.rel.get_related_field().attname)
+        except:
+            logging.debug('Error loading rel.to: %s.%s = %s' % (self.model, self.name, self.rel.to))
+            raise
         return field_default
 
     def get_db_prep_save(self, value, connection):
@@ -1029,9 +1078,18 @@ class ForeignKey(RelatedField, Field):
             raise ValueError("Cannot create form field for %r yet, because "
                              "its related model %r has not been loaded yet" %
                              (self.name, self.rel.to))
+        #DJANGO_SIMPLE
+        #Temp fix for auth profile support
+        #ModelForm fk drop drowns should ideally be filtered by auth profile
+        try:
+            from app.util.common.auth import Sudo
+            queryset = self.rel.to.objects(auth_profile=Sudo())
+        except:
+            queryset = self.rel.to._default_manager.using(db).complex_filter(self.rel.limit_choices_to)
+
         defaults = {
             'form_class': forms.ModelChoiceField,
-            'queryset': self.rel.to._default_manager.using(db).complex_filter(self.rel.limit_choices_to),
+            'queryset': queryset,
             'to_field_name': self.rel.field_name,
         }
         defaults.update(kwargs)

@@ -7,6 +7,7 @@ circular import difficulties.
 """
 
 import weakref
+from django.db import connection, IntegrityError
 
 from django.db.backends import util
 from django.utils import tree
@@ -167,3 +168,51 @@ def deferred_class_factory(model, attrs):
 # The above function is also used to unpickle model instances with deferred
 # fields.
 deferred_class_factory.__safe_for_unpickling__ = True
+
+
+class LazyAttribute(object):
+    """
+    A wrapper for a lazy-loading field. When the value is read from this
+    object the first time, it is deserialized from the underlying entity
+    """
+
+    def __init__(self, field, model):
+        self.field = field
+        self.model_ref = weakref.ref(model)
+
+    def __get__(self, instance=None, owner=None):
+        if instance is None:
+            raise AttributeError('Can only be accessed via an instance.')
+
+        field = self.field
+        field_name = field.column
+        data = instance.__dict__
+        if instance._state.entity is not None:
+            if data.get(field_name, self) is self:
+                cls = self.model_ref()
+
+                try:
+                    value = instance._state.entity[field_name]
+                except KeyError:
+                    if instance._state.entity.is_projection():
+                        raise AttributeError(u"Projected '%s' object has no attribute '%s'" % (cls.__name__, field_name))
+                    value = field.get_default()
+                else:
+                    value = connection.ops.value_from_db(value, field)
+                    value = field.to_python(value)
+
+                if value is None:
+                    if not field.null:
+                        if not getattr(cls._meta, 'poly', False) or field in cls._meta.fields:
+                            raise IntegrityError("Non-nullable field %s can't be None!" % field.name)
+
+                data[field_name] = value
+
+        return data[field_name]
+
+    def __set__(self, instance, value):
+        """
+        Lazy loading attributes can be set normally (which means there will
+        never be a entity lookup involved.)
+        """
+        instance.__dict__[self.field.attname] = value

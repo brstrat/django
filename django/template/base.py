@@ -2,7 +2,7 @@ from __future__ import absolute_import
 
 import re
 from functools import partial
-from inspect import getargspec
+from inspect import getargspec, isclass
 
 from django.conf import settings
 from django.template.context import (Context, RequestContext,
@@ -19,6 +19,7 @@ from django.utils.formats import localize
 from django.utils.html import escape
 from django.utils.module_loading import module_has_submodule
 from django.utils.timezone import localtime
+import logging
 
 
 TOKEN_TEXT = 0
@@ -73,6 +74,9 @@ class TemplateSyntaxError(Exception):
     pass
 
 class TemplateDoesNotExist(Exception):
+    pass
+
+class ParseTemplateDoesNotExist(Exception):
     pass
 
 class TemplateEncodingError(Exception):
@@ -164,6 +168,9 @@ class Token(object):
         return ('<%s token: "%s...">' %
                 (token_name, self.contents[:20].replace('\n', '')))
 
+    def __repr__(self):
+        return str(self)
+
     def split_contents(self):
         split = []
         bits = iter(smart_split(self.contents))
@@ -251,6 +258,12 @@ class Parser(object):
                     command = token.contents.split()[0]
                 except IndexError:
                     self.empty_block_tag(token)
+
+                if command == 'end' and token.contents in parse_until:
+                    # Treat {% end x %} as special, to allow parser.parse(['end x'])
+                    self.prepend_token(token)
+                    return nodelist
+
                 if command in parse_until:
                     # put token back on token list so calling
                     # code knows why it terminated
@@ -268,6 +281,9 @@ class Parser(object):
                 except TemplateSyntaxError, e:
                     if not self.compile_function_error(token, e):
                         raise
+                except TemplateDoesNotExist, se:
+                    logging.error("Template references another template that can not be found %s" %token, exc_info=1)
+                    raise ParseTemplateDoesNotExist(se)
                 self.extend_nodelist(nodelist, compiled_result, token)
                 self.exit_command()
         if parse_until:
@@ -595,6 +611,8 @@ class FilterExpression(object):
                 obj = localtime(obj, context.use_tz)
             if getattr(func, 'needs_autoescape', False):
                 new_obj = func(obj, autoescape=context.autoescape, *arg_vals)
+            elif getattr(func, 'takes_context', False):
+                new_obj = func(obj, _context=context, *arg_vals)
             else:
                 new_obj = func(obj, *arg_vals)
             if getattr(func, 'is_safe', False) and isinstance(obj, SafeData):
@@ -708,10 +726,6 @@ class Variable(object):
             except ValueError:
                 # Otherwise we'll set self.lookups so that resolve() knows we're
                 # dealing with a bonafide variable
-                if var.find(VARIABLE_ATTRIBUTE_SEPARATOR + '_') > -1 or var[0] == '_':
-                    raise TemplateSyntaxError("Variables and attributes may "
-                                              "not begin with underscores: '%s'" %
-                                              var)
                 self.lookups = tuple(var.split(VARIABLE_ATTRIBUTE_SEPARATOR))
 
     def resolve(self, context):
@@ -762,7 +776,7 @@ class Variable(object):
                             raise VariableDoesNotExist("Failed lookup for key "
                                                        "[%s] in %r",
                                                        (bit, current))  # missing attribute
-                if callable(current):
+                if callable(current) and not isclass(current):
                     if getattr(current, 'do_not_call_in_templates', False):
                         pass
                     elif getattr(current, 'alters_data', False):
@@ -853,9 +867,10 @@ def _render_value_in_context(value, context):
     means escaping, if required, and conversion to a unicode object. If value
     is a string, it is expected to have already been translated.
     """
-    value = localtime(value, use_tz=context.use_tz)
-    value = localize(value, use_l10n=context.use_l10n)
-    value = force_unicode(value)
+    if not isinstance(value, unicode):
+        value = localtime(value, use_tz=context.use_tz)
+        value = localize(value, use_l10n=context.use_l10n)
+        value = force_unicode(value)
     if ((context.autoescape and not isinstance(value, SafeData)) or
             isinstance(value, EscapeData)):
         return escape(value)
@@ -880,7 +895,7 @@ class VariableNode(Node):
         return _render_value_in_context(output, context)
 
 # Regex for token keyword arguments
-kwarg_re = re.compile(r"(?:(\w+)=)?(.+)")
+kwarg_re = re.compile(r"(?:([^=]+)=)?(.+)")
 
 def token_kwargs(bits, parser, support_legacy=False):
     """
@@ -1078,7 +1093,7 @@ class Library(object):
         elif name is not None and filter_func is not None:
             # register.filter('somename', somefunc)
             self.filters[name] = filter_func
-            for attr in ('expects_localtime', 'is_safe', 'needs_autoescape'):
+            for attr in ('expects_localtime', 'is_safe', 'needs_autoescape', 'takes_context'):
                 if attr in flags:
                     value = flags[attr]
                     # set the flag on the filter for FilterExpression.resolve

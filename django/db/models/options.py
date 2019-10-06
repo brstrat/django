@@ -17,7 +17,10 @@ get_verbose_name = lambda class_name: re.sub('(((?<=[a-z])[A-Z])|([A-Z](?![A-Z]|
 DEFAULT_NAMES = ('verbose_name', 'verbose_name_plural', 'db_table', 'ordering',
                  'unique_together', 'permissions', 'get_latest_by',
                  'order_with_respect_to', 'app_label', 'db_tablespace',
-                 'abstract', 'managed', 'proxy', 'auto_created')
+                 'abstract', 'managed', 'proxy', 'auto_created',
+                 # DJANGO_SIMPLE
+                 'poly', 'cascade_delete', 'unindexed', 'indexed',
+                 'can_soft_delete', 'layout_whitelist', 'rocket_exclude', 'rocket_embed',)
 
 class Options(object):
     def __init__(self, meta, app_label=None):
@@ -38,8 +41,16 @@ class Options(object):
         self.pk = None
         self.has_auto_field, self.auto_field = False, None
         self.abstract = False
+        self.poly = False
+        self._initial_load = True
+        self.cascade_delete = {}
+        self.unindexed = []
+        self.indexed = []
+        self.rocket_exclude = []
+        self.rocket_embed = []
         self.managed = True
         self.proxy = False
+        self.layout_whitelist = set()
         # For any class that is a proxy (including automatically created
         # classes for deferred object loading), proxy_for_model tells us
         # which class this model is proxying. Note that proxy_for_model
@@ -169,6 +180,9 @@ class Options(object):
                 del self._m2m_cache
         else:
             self.local_fields.insert(bisect(self.local_fields, field), field)
+            if getattr(self, 'poly_fields', []):
+                if field.name not in [f.name for f in self.poly_fields]:
+                    self.poly_fields.insert(bisect(self.poly_fields, field), field)
             self.setup_pk(field)
             if hasattr(self, '_field_cache'):
                 del self._field_cache
@@ -343,9 +357,9 @@ class Options(object):
         for f, model in self.get_all_related_objects_with_model():
             cache[f.field.related_query_name()] = (f, model, False, False)
         for f, model in self.get_m2m_with_model():
-            cache[f.name] = (f, model, True, True)
+            cache[f.name] = cache[f.attname] = (f, model, True, True)
         for f, model in self.get_fields_with_model():
-            cache[f.name] = (f, model, True, False)
+            cache[f.name] = cache[f.attname] = (f, model, True, False)
         if app_cache_ready():
             self._name_map = cache
         return cache

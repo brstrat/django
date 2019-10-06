@@ -14,6 +14,7 @@ from django.utils.datastructures import SortedDict
 from django.utils.html import conditional_escape
 from django.utils.encoding import StrAndUnicode, smart_unicode, force_unicode
 from django.utils.safestring import mark_safe
+import settings
 
 
 __all__ = ('BaseForm', 'Form')
@@ -74,7 +75,7 @@ class BaseForm(StrAndUnicode):
     # class, not to the Form class.
     def __init__(self, data=None, files=None, auto_id='id_%s', prefix=None,
                  initial=None, error_class=ErrorList, label_suffix=':',
-                 empty_permitted=False):
+                 empty_permitted=False, *args, **kwargs):
         self.is_bound = data is not None or files is not None
         self.data = data or {}
         self.files = files or {}
@@ -130,15 +131,15 @@ class BaseForm(StrAndUnicode):
 
         Subclasses may wish to override.
         """
-        return self.prefix and ('%s-%s' % (self.prefix, field_name)) or field_name
+        return self.prefix and ('%s__%s' % (self.prefix, field_name)) or field_name
 
     def add_initial_prefix(self, field_name):
         """
         Add a 'initial' prefix for checking dynamic initial values
         """
-        return u'initial-%s' % self.add_prefix(field_name)
+        return u'initial__%s' % self.add_prefix(field_name)
 
-    def _html_output(self, normal_row, error_row, row_ender, help_text_html, errors_on_separate_row):
+    def _html_output(self, normal_row, error_row, row_ender, help_text_html, errors_on_separate_row, context=None):
         "Helper function for outputting HTML. Used by as_table(), as_ul(), as_p()."
         top_errors = self.non_field_errors() # Errors that should be displayed above all fields.
         output, hidden_fields = [], []
@@ -162,13 +163,20 @@ class BaseForm(StrAndUnicode):
                     output.append(error_row % force_unicode(bf_errors))
 
                 if bf.label:
+                    if settings.MARK_TRANSLATED_WORDS:
+                        bf.label = mark_safe(bf.label)
                     label = conditional_escape(force_unicode(bf.label))
                     # Only add the suffix if the label does not end in
                     # punctuation.
                     if self.label_suffix:
                         if label[-1] not in ':?.!':
                             label += self.label_suffix
-                    label = bf.label_tag(label) or ''
+                    if field.hint and context:
+                        from app.templatetags.helpers import hint as hint_tag
+                        hint = hint_tag(context, field.hint)
+                    else:
+                        hint = ''
+                    label = bf.label_tag(label + hint) or ''
                 else:
                     label = ''
 
@@ -219,14 +227,15 @@ class BaseForm(StrAndUnicode):
             help_text_html = u'<br /><span class="helptext">%s</span>',
             errors_on_separate_row = False)
 
-    def as_ul(self):
+    def as_ul(self, context=None):
         "Returns this form rendered as HTML <li>s -- excluding the <ul></ul>."
         return self._html_output(
             normal_row = u'<li%(html_class_attr)s>%(errors)s%(label)s %(field)s%(help_text)s</li>',
             error_row = u'<li>%s</li>',
             row_ender = '</li>',
             help_text_html = u' <span class="helptext">%s</span>',
-            errors_on_separate_row = False)
+            errors_on_separate_row = False,
+            context=context)
 
     def as_p(self):
         "Returns this form rendered as HTML <p>s."
@@ -280,11 +289,8 @@ class BaseForm(StrAndUnicode):
             # widgets split data over several HTML fields.
             value = field.widget.value_from_datadict(self.data, self.files, self.add_prefix(name))
             try:
-                if isinstance(field, FileField):
-                    initial = self.initial.get(name, field.initial)
-                    value = field.clean(value, initial)
-                else:
-                    value = field.clean(value)
+                initial = self.initial.get(name, field.initial)
+                value = field.clean(value, initial=initial)
                 self.cleaned_data[name] = value
                 if hasattr(self, 'clean_%s' % name):
                     value = getattr(self, 'clean_%s' % name)()
@@ -398,10 +404,15 @@ class BoundField(StrAndUnicode):
         self.html_name = form.add_prefix(name)
         self.html_initial_name = form.add_initial_prefix(name)
         self.html_initial_id = form.add_initial_prefix(self.auto_id)
-        if self.field.label is None:
-            self.label = pretty_name(name)
+        has_placeholder = (field.widget.attrs.get('title', False) or field.widget.attrs.get('placeholder', False)) and getattr(field, 'watermark', False)
+        show_label  = getattr(field, 'show_label', False)
+        if not has_placeholder or show_label:
+            if self.field.label is None:
+                self.label = pretty_name(name)
+            else:
+                self.label = self.field.label
         else:
-            self.label = self.field.label
+            self.label = None
         self.help_text = field.help_text or ''
 
     def __unicode__(self):

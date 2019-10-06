@@ -17,6 +17,7 @@ from django.utils.translation import ugettext, ugettext_lazy
 from django.utils.encoding import StrAndUnicode, force_unicode
 from django.utils.safestring import mark_safe
 from django.utils import datetime_safe, formats
+from app.util import find_or_none
 
 __all__ = (
     'Media', 'MediaDefiningClass', 'Widget', 'TextInput', 'PasswordInput',
@@ -25,6 +26,8 @@ __all__ = (
     'Select', 'NullBooleanSelect', 'SelectMultiple', 'RadioSelect',
     'CheckboxSelectMultiple', 'MultiWidget',
     'SplitDateTimeWidget',
+
+    'DisplayOnly', 'SimpleSelect',
 )
 
 MEDIA_TYPES = ('css','js')
@@ -487,7 +490,6 @@ class TimeInput(Input):
             pass
         return super(TimeInput, self)._has_changed(self._format_value(initial), data)
 
-
 # Defined at module level so that CheckboxInput is picklable (#17976)
 def boolean_check(v):
     return not (v is False or v is None or v == '')
@@ -576,6 +578,22 @@ class Select(Widget):
             else:
                 output.append(self.render_option(selected_choices, option_value, option_label))
         return u'\n'.join(output)
+
+# Select wrapped
+class SimpleSelect(Select):
+    def render(self, *args, **kwargs):
+        attrs = kwargs.get('attrs') or {}
+        attrs.update(self.attrs)
+        attrs['class'] = attrs.get('class', '') + ' vanadium-advice-after-label'
+        kwargs['attrs'] = attrs
+
+        output = super(SimpleSelect, self).render(*args, **kwargs)
+        wrapper = """
+<div class="componentSelectBoxHolder :container">
+    <i class='fa fa-chevron-down fa-lg'></i>
+        %s
+</div>"""
+        return mark_safe(wrapper % output)
 
 class NullBooleanSelect(Select):
     """
@@ -666,7 +684,7 @@ class RadioInput(SubWidget):
         else:
             label_for = ''
         choice_label = conditional_escape(force_unicode(self.choice_label))
-        return mark_safe(u'<label%s>%s %s</label>' % (label_for, self.tag(), choice_label))
+        return mark_safe(u'<label%s>%s <span class="label-text">%s</span></label>' % (label_for, self.tag(), choice_label))
 
     def is_checked(self):
         return self.value == self.choice_value
@@ -759,7 +777,7 @@ class CheckboxSelectMultiple(SelectMultiple):
             option_value = force_unicode(option_value)
             rendered_cb = cb.render(name, option_value)
             option_label = conditional_escape(force_unicode(option_label))
-            output.append(u'<li><label%s>%s %s</label></li>' % (label_for, rendered_cb, option_label))
+            output.append(u'<li><label%s>%s <span class="label-text">%s</span></label></li>' % (label_for, rendered_cb, option_label))
         output.append(u'</ul>')
         return mark_safe(u'\n'.join(output))
 
@@ -899,3 +917,44 @@ class SplitHiddenDateTimeWidget(SplitDateTimeWidget):
         for widget in self.widgets:
             widget.input_type = 'hidden'
             widget.is_hidden = True
+
+class DisplayOnly(Widget):
+    """
+    Display value only, no input
+    """
+    static_value = None
+
+    def __init__(self, hidden_input=False, choices=(), *args, **kwargs):
+        super(DisplayOnly, self).__init__(*args, **kwargs)
+        self.choices = list(choices)
+        self.hidden_input = hidden_input
+
+    def render(self, name, value, attrs=None):
+        value = self.static_value or value
+        if self.filters:
+            from app.templatetags.filters import apply_filter
+            value = apply_filter(value, self.filters)
+
+        if value is None:
+            value = ''
+        final_attrs = self.build_attrs(attrs)
+        value = conditional_escape(force_unicode(value))
+        value_display = value
+        if getattr(self, 'choices', None):
+            found = find_or_none(lambda x :x[0] == value, self.choices)
+            if found:
+                value_display = found[1]
+
+        output = u'<span%s>%s</span>' % (flatatt(final_attrs), value_display)
+
+        if self.hidden_input:
+            output += u"<input type='hidden' name='%s' value='%s'/>" % (name, value)
+
+        return mark_safe(output)
+
+    def value_from_datadict(self, *args, **kwargs):
+        if self.hidden_input:
+            return super(DisplayOnly, self).value_from_datadict(*args, **kwargs)
+        else:
+            # Returns the instance value regardless of bound status
+            return self.static_value

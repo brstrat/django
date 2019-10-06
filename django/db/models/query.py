@@ -11,7 +11,7 @@ from django.db.models.fields import AutoField
 from django.db.models.query_utils import (Q, select_related_descend,
     deferred_class_factory, InvalidQuery)
 from django.db.models.deletion import Collector
-from django.db.models import sql
+from django.db.models import sql, get_model
 from django.utils.functional import partition
 
 # Used to control how many objects are worked with at once in some cases (e.g.
@@ -124,7 +124,14 @@ class QuerySet(object):
             # code path which also forces this, and also does the prefetch
             len(self)
 
-        if self._result_cache is not None:
+        elif self._result_cache is not None:
+            if self._iter is not None and self._result_cache == []:
+                # Just prefetch_async'd
+                try:
+                    iter(self).next()
+                except StopIteration:
+                    pass
+
             return bool(self._result_cache)
         try:
             iter(self).next()
@@ -228,11 +235,24 @@ class QuerySet(object):
     # METHODS THAT DO DATABASE QUERIES #
     ####################################
 
+    def fetch_async(self):
+        if self._result_cache is None:
+            self._iter = self.iterator()
+            self._result_cache = []
+        return self
+
     def iterator(self):
+        _iterator = self._iterator()
+        next(_iterator)
+        return _iterator
+
+    def _iterator(self):
         """
         An iterator over the results from applying this QuerySet to the
         database.
         """
+        from django.db.models.fields.related import MemoizedForeignKeyModel
+
         fill_cache = False
         if connections[self.db].features.supports_select_related:
             fill_cache = self.query.select_related
@@ -247,7 +267,10 @@ class QuerySet(object):
 
         only_load = self.query.get_loaded_field_names()
         if not fill_cache:
-            fields = self.model._meta.fields
+            if getattr(self.model._meta, 'poly', False):
+                fields = self.model._meta.poly_fields
+            else:
+                fields = self.model._meta.fields
 
         load_fields = []
         # If only/defer clauses have been specified,
@@ -266,7 +289,10 @@ class QuerySet(object):
                     load_fields.append(field.name)
 
         index_start = len(extra_select)
-        aggregate_start = index_start + len(load_fields or self.model._meta.fields)
+        if getattr(self.model._meta, 'poly', False):
+            aggregate_start = index_start + len(load_fields or self.model._meta.poly_fields)
+        else:
+            aggregate_start = index_start + len(load_fields or self.model._meta.fields)
 
         skip = None
         if load_fields and not fill_cache:
@@ -279,7 +305,6 @@ class QuerySet(object):
                     skip.add(field.attname)
                 else:
                     init_list.append(field.attname)
-            model_cls = deferred_class_factory(self.model, skip)
 
         # Cache db and model outside the loop
         db = self.db
@@ -288,17 +313,43 @@ class QuerySet(object):
         if fill_cache:
             klass_info = get_klass_info(model, max_depth=max_depth,
                                         requested=requested, only_load=only_load)
-        for row in compiler.results_iter():
+
+        results_iter = compiler.results_iter()
+
+        yield
+
+        is_pk_query, _, _ = self.query.pk_only_filters()
+
+        for row in results_iter:
             if fill_cache:
                 obj, _ = get_cached_row(row, index_start, db, klass_info,
                                         offset=len(aggregate_select))
             else:
+                model_cls = model
+
+                if hasattr(model_cls, 'polymodel_from_row'):
+                    model_cls = model.polymodel_from_row(row)
+
                 if skip:
                     row_data = row[index_start:aggregate_start]
-                    obj = model_cls(**dict(zip(init_list, row_data)))
+                    model_kwargs = dict(zip(init_list, row_data))
+
+                    # If partially loaded, store the raw entity in order to lazily
+                    # deserialize additional fields as requested
+                    model_kwargs['_state_kwargs'] = {'entity': row.entity}
+
+                    obj = model_cls(**model_kwargs)
                 else:
+
                     # Omit aggregates in object creation.
-                    obj = model(*row[index_start:aggregate_start])
+                    obj = model_cls(*row[index_start:aggregate_start])
+
+                try:
+                    # If a PK query and this is a memoizable FK model, set into local memcache
+                    if is_pk_query and issubclass(model, MemoizedForeignKeyModel):
+                        obj.set_get_memoized(remote=False, local=True)
+                except:
+                    pass
 
                 # Store the source database of the object
                 obj._state.db = db
@@ -526,6 +577,9 @@ class QuerySet(object):
                 "Cannot update a query once a slice has been taken."
         self._for_write = True
         query = self.query.clone(sql.UpdateQuery)
+        _return_entities = kwargs.pop('_return_entities', False)
+        _update_search_indexes = kwargs.pop('_update_search_indexes', True)
+        _retrieve_keys_only = kwargs.pop('_keys_only', True)  # whether or not to retrieve entity PKs before updating
         query.add_update_values(kwargs)
         if not transaction.is_managed(using=self.db):
             transaction.enter_transaction_management(using=self.db)
@@ -533,7 +587,11 @@ class QuerySet(object):
         else:
             forced_managed = False
         try:
-            rows = query.get_compiler(self.db).execute_sql(None)
+            rows = query.get_compiler(self.db).execute_sql(
+                'entities' if _return_entities else None,
+                keys_only=_retrieve_keys_only,
+                update_search_indexes=_update_search_indexes,
+            )
             if forced_managed:
                 transaction.commit(using=self.db)
             else:
@@ -1197,6 +1255,9 @@ class EmptyQuerySet(QuerySet):
         """
         return self
 
+    def clear_order_by(self):
+        return self
+
     def order_by(self, *field_names):
         """
         Always returns EmptyQuerySet.
@@ -1600,28 +1661,24 @@ def prefetch_related_objects(result_cache, related_lookups):
     Populates prefetched objects caches for a list of results
     from a QuerySet
     """
-    from django.db.models.sql.constants import LOOKUP_SEP
 
     if len(result_cache) == 0:
         return # nothing to do
 
     model = result_cache[0].__class__
 
+    related_lookups = set(related_lookups)
+
     # We need to be able to dynamically add to the list of prefetch_related
     # lookups that we look up (see below).  So we need some book keeping to
     # ensure we don't do duplicate work.
-    done_lookups = set() # list of lookups like foo__bar__baz
     done_queries = {}    # dictionary of things like 'foo__bar': [results]
 
     auto_lookups = [] # we add to this as we go through.
     followed_descriptors = set() # recursion protection
 
-    all_lookups = itertools.chain(related_lookups, auto_lookups)
-    for lookup in all_lookups:
-        if lookup in done_lookups:
-            # We've done exactly this already, skip the whole thing
-            continue
-        done_lookups.add(lookup)
+    def parallel_prefetch_related_objects(lookup):
+        from django.db.models.sql.constants import LOOKUP_SEP
 
         # Top level, the list of objects to decorate is the the result cache
         # from the primary QuerySet. It won't be for deeper levels.
@@ -1677,7 +1734,9 @@ def prefetch_related_objects(result_cache, related_lookups):
                 if current_lookup in done_queries:
                     obj_list = done_queries[current_lookup]
                 else:
-                    obj_list, additional_prl = prefetch_one_level(obj_list, prefetcher, attr)
+                    for result in prefetch_one_level(obj_list, prefetcher, attr):
+                        yield
+                    obj_list, additional_prl = result
                     # We need to ensure we don't keep adding lookups from the
                     # same relationships to stop infinite recursion. So, if we
                     # are already on an automatically added lookup, don't add
@@ -1700,6 +1759,21 @@ def prefetch_related_objects(result_cache, related_lookups):
                 # Filter out 'None' so that we can continue with nullable
                 # relations.
                 obj_list = [obj for obj in obj_list if obj is not None]
+
+    def perform_lookups(lookups):
+
+        deferreds = [parallel_prefetch_related_objects(lookup) for lookup in lookups]
+
+        for _ in roundrobin(*deferreds):
+            pass
+
+    perform_lookups(related_lookups)
+
+    for lookup in auto_lookups:
+        if lookup in related_lookups:
+            # We've done exactly this already, skip the whole thing
+            continue
+        perform_lookups([lookup])
 
 
 def get_prefetcher(instance, attr):
@@ -1770,18 +1844,31 @@ def prefetch_one_level(instances, prefetcher, attname):
 
     rel_qs, rel_obj_attr, instance_attr, single, cache_name =\
         prefetcher.get_prefetch_query_set(instances)
-    # We have to handle the possibility that the default manager itself added
-    # prefetch_related lookups to the QuerySet we just got back. We don't want to
-    # trigger the prefetch_related functionality by evaluating the query.
-    # Rather, we need to merge in the prefetch_related lookups.
-    additional_prl = getattr(rel_qs, '_prefetch_related_lookups', [])
-    if additional_prl:
-        # Don't need to clone because the manager should have given us a fresh
-        # instance, so we access an internal instead of using public interface
-        # for performance reasons.
-        rel_qs._prefetch_related_lookups = []
 
-    all_related_objects = list(rel_qs)
+    if hasattr(rel_qs.model, '_get_memoized_multi_async'):
+        additional_prl = []
+        rel_qs = rel_qs.model._get_memoized_multi_async({instance_attr(instance) for instance in instances})
+        for all_related_objects in rel_qs:
+            yield
+    else:
+        # We have to handle the possibility that the default manager itself added
+        # prefetch_related lookups to the QuerySet we just got back. We don't want to
+        # trigger the prefetch_related functionality by evaluating the query.
+        # Rather, we need to merge in the prefetch_related lookups.
+        additional_prl = getattr(rel_qs, '_prefetch_related_lookups', [])
+        if additional_prl:
+            # Don't need to clone because the manager should have given us a fresh
+            # instance, so we access an internal instead of using public interface
+            # for performance reasons.
+            rel_qs._prefetch_related_lookups = []
+
+        rel_qs = rel_qs.only('pk')
+
+        rel_qs.fetch_async()
+
+        yield
+
+        all_related_objects = list(rel_qs)
 
     rel_obj_cache = {}
     for rel_obj in all_related_objects:
@@ -1806,4 +1893,18 @@ def prefetch_one_level(instances, prefetcher, attname):
             # have merged this into the current work.
             qs._prefetch_done = True
             obj._prefetched_objects_cache[cache_name] = qs
-    return all_related_objects, additional_prl
+    yield all_related_objects, additional_prl
+
+
+def roundrobin(*iterables):
+    """ Advance each iterable in turn one step until all are exhausted """
+    from itertools import cycle, islice
+    pending = len(iterables)
+    nexts = cycle(iter(it).next for it in iterables)
+    while pending:
+        try:
+            for next in nexts:
+                yield next()
+        except StopIteration:
+            pending -= 1
+            nexts = cycle(islice(nexts, pending))

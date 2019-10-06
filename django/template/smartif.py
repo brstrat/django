@@ -2,11 +2,15 @@
 Parser and utilities for the smart 'if' tag
 """
 
+from django.conf import settings
+
+
 # Using a simple top down parser, as described here:
 #    http://effbot.org/zone/simple-top-down-parsing.htm.
 # 'led' = left denotation
 # 'nud' = null denotation
 # 'bp' = binding power (left = lbp, right = rbp)
+
 
 class TokenBase(object):
     """
@@ -56,7 +60,11 @@ def infix(bp, func):
         def eval(self, context):
             try:
                 return func(context, self.first, self.second)
-            except Exception:
+            except Exception as e:
+                if settings.TEMPLATE_DEBUG:
+                    from django.template import TemplateSyntaxError
+                    if isinstance(e, TemplateSyntaxError):
+                        raise
                 # Templates shouldn't throw exceptions when rendering.  We are
                 # most likely to get exceptions for things like {% if foo in bar
                 # %} where 'bar' does not support 'in', so default to False

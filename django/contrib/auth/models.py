@@ -64,7 +64,7 @@ class Permission(models.Model):
     created for each Django model.
     """
     name = models.CharField(_('name'), max_length=50)
-    content_type = models.ForeignKey(ContentType)
+    content_type = models.ForeignKey(ContentType, related_name="+")
     codename = models.CharField(_('codename'), max_length=100)
     objects = PermissionManager()
 
@@ -72,8 +72,7 @@ class Permission(models.Model):
         verbose_name = _('permission')
         verbose_name_plural = _('permissions')
         unique_together = (('content_type', 'codename'),)
-        ordering = ('content_type__app_label', 'content_type__model',
-                    'codename')
+        ordering = ('codename',)
 
     def __unicode__(self):
         return u"%s | %s | %s" % (
@@ -111,9 +110,7 @@ class Group(models.Model):
     messages.
     """
     name = models.CharField(_('name'), max_length=80, unique=True)
-    permissions = models.ManyToManyField(Permission,
-        verbose_name=_('permissions'), blank=True)
-
+    permissions = models.ManyToManyField(Permission, verbose_name=_('permissions'), blank=True,  related_name="permission_set_for_%(class)s_%(app_label)s+")
     objects = GroupManager()
 
     class Meta:
@@ -162,8 +159,8 @@ class UserManager(models.Manager):
 
     def create_superuser(self, username, email, password):
         u = self.create_user(username, email, password)
-        u.is_staff = True
         u.is_active = True
+        u.is_staff = True
         u.is_superuser = True
         u.save(using=self._db)
         return u
@@ -247,13 +244,6 @@ class User(models.Model):
                     'explicitly assigning them.'))
     last_login = models.DateTimeField(_('last login'), default=timezone.now)
     date_joined = models.DateTimeField(_('date joined'), default=timezone.now)
-    groups = models.ManyToManyField(Group, verbose_name=_('groups'),
-        blank=True, help_text=_('The groups this user belongs to. A user will '
-                                'get all permissions granted to each of '
-                                'his/her group.'))
-    user_permissions = models.ManyToManyField(Permission,
-        verbose_name=_('user permissions'), blank=True,
-        help_text='Specific permissions for this user.')
     objects = UserManager()
 
     class Meta:
@@ -410,6 +400,7 @@ class AnonymousUser(object):
     is_staff = False
     is_active = False
     is_superuser = False
+    view_as_employee_role = None
     _groups = EmptyManager()
     _user_permissions = EmptyManager()
 
@@ -474,3 +465,6 @@ class AnonymousUser(object):
 
     def is_authenticated(self):
         return False
+
+    def check_view_as_employee_role(self, base_instance=None):
+        pass

@@ -14,6 +14,7 @@ from django.utils.encoding import force_unicode, iri_to_uri
 from django.utils.log import getLogger
 
 logger = getLogger('django.request')
+import settings
 
 
 # See http://www.iana.org/assignments/http-status-codes

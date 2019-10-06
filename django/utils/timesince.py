@@ -31,7 +31,10 @@ def timesince(d, now=None, reversed=False):
         now = datetime.datetime(now.year, now.month, now.day)
 
     if not now:
-        now = datetime.datetime.now(utc if is_aware(d) else None)
+        if is_aware(d):
+            now = datetime.datetime.now(utc)
+        else:
+            now = datetime.datetime.utcnow()
 
     delta = (d - now) if reversed else (now - d)
     # ignore microseconds
@@ -57,4 +60,9 @@ def timeuntil(d, now=None):
     Like timesince, but returns a string measuring the time until
     the given time.
     """
+    if not now:
+        if is_aware(d):
+            now = datetime.datetime.now(utc)
+        else:
+            now = datetime.datetime.utcnow()
     return timesince(d, now, reversed=True)

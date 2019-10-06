@@ -5,6 +5,8 @@ backwards compatibility utilities.
 Add SubfieldBase as the __metaclass__ for your Field subclass, implement
 to_python() and the other necessary methods and everything will work seamlessly.
 """
+from django.db.models.query_utils import LazyAttribute
+
 
 class SubfieldBase(type):
     """
@@ -16,20 +18,13 @@ class SubfieldBase(type):
         new_class.contribute_to_class = make_contrib(
             new_class, attrs.get('contribute_to_class')
         )
+        new_class.descriptor_class = Creator
         return new_class
 
-class Creator(object):
+class Creator(LazyAttribute):
     """
     A placeholder class that provides a way to set the attribute on the model.
     """
-    def __init__(self, field):
-        self.field = field
-
-    def __get__(self, obj, type=None):
-        if obj is None:
-            raise AttributeError('Can only be accessed via an instance.')
-        return obj.__dict__[self.field.name]
-
     def __set__(self, obj, value):
         obj.__dict__[self.field.name] = self.field.to_python(value)
 
@@ -47,6 +42,6 @@ def make_contrib(superclass, func=None):
             func(self, cls, name)
         else:
             super(superclass, self).contribute_to_class(cls, name)
-        setattr(cls, self.name, Creator(self))
+        setattr(cls, self.name, Creator(self, cls))
 
     return contribute_to_class

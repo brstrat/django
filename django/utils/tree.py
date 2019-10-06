@@ -5,6 +5,9 @@ ORM.
 
 import copy
 
+from django.utils.encoding import smart_str, force_text
+
+
 class Node(object):
     """
     A single internal node in the tree graph. A Node should be viewed as a
@@ -46,11 +49,8 @@ class Node(object):
     _new_instance = classmethod(_new_instance)
 
     def __str__(self):
-        if self.negated:
-            return '(NOT (%s: %s))' % (self.connector, ', '.join([str(c) for c
-                    in self.children]))
-        return '(%s: %s)' % (self.connector, ', '.join([str(c) for c in
-                self.children]))
+        template = '(NOT (%s: %s))' if self.negated else '(%s: %s)'
+        return smart_str(template % (self.connector, ', '.join(force_text(c) for c in self.children)))
 
     def __deepcopy__(self, memodict):
         """

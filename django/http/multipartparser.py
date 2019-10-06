@@ -101,6 +101,8 @@ class MultiPartParser(object):
 
         encoding = self._encoding
         handlers = self._upload_handlers
+        if self._content_length == 0:
+            return QueryDict(MultiValueDict(), encoding=self._encoding), MultiValueDict()
 
         # HTTP spec says that Content-Length >= 0 is valid
         # handling content-length == 0 before continuing
@@ -151,10 +153,10 @@ class MultiPartParser(object):
 
                 if item_type == FIELD:
                     # This is a post field, we can just set it in the post
-                    if transfer_encoding == 'base64':
+                    if transfer_encoding in ('base64', 'quoted-printable'):
                         raw_data = field_stream.read()
                         try:
-                            data = str(raw_data).decode('base64')
+                            data = str(raw_data).decode(transfer_encoding)
                         except:
                             data = raw_data
                     else:
@@ -171,8 +173,12 @@ class MultiPartParser(object):
                     file_name = self.IE_sanitize(unescape_entities(file_name))
 
                     content_type = meta_data.get('content-type', ('',))[0].strip()
+                    content_type_extra = meta_data.get('content-type', (0, {}))[1]
+                    if content_type_extra is None:
+                        content_type_extra = {}
+
                     try:
-                        charset = meta_data.get('content-type', (0,{}))[1].get('charset', None)
+                        charset = content_type_extra.get('charset', None)
                     except:
                         charset = None
 
@@ -187,8 +193,13 @@ class MultiPartParser(object):
                             try:
                                 handler.new_file(field_name, file_name,
                                                  content_type, content_length,
-                                                 charset)
+                                                 charset, content_type_extra.copy())
+
                             except StopFutureHandlers:
+                                # SIMPLE:  Appengine upload handlerneeds to know transfer_encoding to decode upload metadata
+                                if getattr(handler, 'set_content_transfer_encoding', False):
+                                    handler.set_content_transfer_encoding(transfer_encoding)
+
                                 break
 
                         for chunk in field_stream:

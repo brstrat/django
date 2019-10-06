@@ -147,6 +147,9 @@ class Collector(object):
         models, the one case in which the cascade follows the forwards
         direction of an FK rather than the reverse direction.)
         """
+        if not connections[self.using].features.supports_deleting_related_objects:
+            collect_related = False
+
         new_objs = self.add(objs, source, nullable,
                             reverse_dependency=reverse_dependency)
         if not new_objs:
@@ -171,6 +174,10 @@ class Collector(object):
                 if related.model._meta.auto_created:
                     self.add_batch(related.model, field, new_objs)
                 else:
+                    # No need to fetch related objects if we are not doing
+                    # anything with them.
+                    if field.rel.on_delete == DO_NOTHING:
+                        continue
                     sub_objs = self.related_objects(related, new_objs)
                     if not sub_objs:
                         continue

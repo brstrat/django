@@ -26,6 +26,7 @@ class NOT_PROVIDED:
 # of most "choices" lists.
 BLANK_CHOICE_DASH = [("", "---------")]
 BLANK_CHOICE_NONE = [("", "None")]
+BLANK_CHOICE_BLANK= [("", "")]
 
 class FieldDoesNotExist(Exception):
     pass
@@ -247,6 +248,10 @@ class Field(object):
             setattr(cls, 'get_%s_display' % self.name,
                     curry(cls._get_FIELD_display, field=self))
 
+        elif getattr(self, 'item_field', None) and getattr(self.item_field, 'choices', None):
+            setattr(cls, 'get_%s_display' % self.name,
+                    curry(cls._get_FIELD_display, field=self))
+
     def get_attname(self):
         return self.name
 
@@ -386,12 +391,15 @@ class Field(object):
     def get_validator_unique_lookup_type(self):
         return '%s__exact' % self.name
 
-    def get_choices(self, include_blank=True, blank_choice=BLANK_CHOICE_DASH):
+    def get_choices(self, include_blank=True, blank_choice=BLANK_CHOICE_BLANK):
         """Returns choices with a default blank choices included, for use
         as SelectField choices for this field."""
         first_choice = include_blank and blank_choice or []
         if self.choices:
-            return first_choice + list(self.choices)
+            lst = list(self.choices)
+            if first_choice and first_choice[0] in lst:
+                return lst
+            return first_choice + lst
         rel_model = self.rel.to
         if hasattr(self.rel, 'get_related_field'):
             lst = [(getattr(x, self.rel.get_related_field().attname),
@@ -408,7 +416,7 @@ class Field(object):
         return self.get_choices()
 
     def get_flatchoices(self, include_blank=True,
-                        blank_choice=BLANK_CHOICE_DASH):
+                        blank_choice=BLANK_CHOICE_BLANK):
         """
         Returns flattened choices with a default blank choice included.
         """
@@ -490,7 +498,7 @@ class Field(object):
         """
         Returns the value of this field in the given model instance.
         """
-        return getattr(obj, self.attname)
+        return getattr(obj, self.attname, None)
 
     def __repr__(self):
         """
@@ -503,12 +511,9 @@ class Field(object):
         return '<%s>' % path
 
 class AutoField(Field):
-    description = _("Integer")
+    description = _("Automatic key")
 
     empty_strings_allowed = False
-    default_error_messages = {
-        'invalid': _(u"'%s' value must be an integer."),
-    }
 
     def __init__(self, *args, **kwargs):
         assert kwargs.get('primary_key', False) is True, \
@@ -519,22 +524,13 @@ class AutoField(Field):
     def get_internal_type(self):
         return "AutoField"
 
-    def to_python(self, value):
-        if value is None:
-            return value
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            msg = self.error_messages['invalid'] % str(value)
-            raise exceptions.ValidationError(msg)
-
     def validate(self, value, model_instance):
         pass
 
-    def get_prep_value(self, value):
+    def get_db_prep_value(self, value, connection, prepared=False):
         if value is None:
-            return None
-        return int(value)
+            return value
+        return connection.ops.value_to_db_auto(value)
 
     def contribute_to_class(self, cls, name):
         assert not cls._meta.has_auto_field, \
@@ -786,7 +782,7 @@ class DateTimeField(DateField):
 
     def pre_save(self, model_instance, add):
         if self.auto_now or (self.auto_now_add and add):
-            value = timezone.now()
+            value = datetime.datetime.utcnow()
             setattr(model_instance, self.attname, value)
             return value
         else:

@@ -160,7 +160,7 @@ class AppCache(object):
 
     def get_models(self, app_mod=None,
                    include_auto_created=False, include_deferred=False,
-                   only_installed=True):
+                   only_installed=False):
         """
         Given a module containing models, returns a list of the models.
         Otherwise returns a list of all installed models.
@@ -202,7 +202,7 @@ class AppCache(object):
         return model_list
 
     def get_model(self, app_label, model_name,
-                  seed_cache=True, only_installed=True):
+                  seed_cache=True, only_installed=False):
         """
         Returns the model matching the given app_label and case-insensitive
         model_name.

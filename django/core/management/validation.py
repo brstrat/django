@@ -112,8 +112,6 @@ def get_validation_errors(outfile, app=None):
             # Check to see if the related field will clash with any existing
             # fields, m2m fields, m2m related objects or related objects
             if f.rel:
-                if f.rel.to not in models.get_models():
-                    e.add(opts, "'%s' has a relation with model %s, which has either not been installed or is abstract." % (f.name, f.rel.to))
                 # it is a string and we could not find the model it refers to
                 # so skip the next section
                 if isinstance(f.rel.to, (str, unicode)):
@@ -248,7 +246,7 @@ def get_validation_errors(outfile, app=None):
             # occurs for symmetrical m2m relations to self). If this is the
             # case, there are no clashes to check for this field, as there are
             # no reverse descriptors for this field.
-            if rel_name is not None:
+            if rel_name is not None and not f.rel.is_hidden():
                 for r in rel_opts.fields:
                     if r.name == rel_name:
                         e.add(opts, "Accessor for m2m field '%s' clashes with field '%s.%s'. Add a related_name argument to the definition for '%s'." % (f.name, rel_opts.object_name, r.name, f.name))

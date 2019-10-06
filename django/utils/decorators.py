@@ -1,6 +1,8 @@
 "Functions that help with dynamically creating decorators for views."
 
 from functools import wraps, update_wrapper, WRAPPER_ASSIGNMENTS
+import logging
+from django.http import HTTPMethodNotSupported
 
 class classonlymethod(classmethod):
     def __get__(self, instance, owner):
@@ -89,6 +91,9 @@ def make_middleware_decorator(middleware_class):
                         return result
                 try:
                     response = view_func(request, *args, **kwargs)
+                except HTTPMethodNotSupported, hr:
+                    logging.warning("Attempt to access blocked HTTP method", exc_info=1)
+                    return hr.http_response
                 except Exception, e:
                     if hasattr(middleware, 'process_exception'):
                         result = middleware.process_exception(request, e)
